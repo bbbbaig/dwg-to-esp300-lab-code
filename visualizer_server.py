@@ -20,6 +20,12 @@ import cv2
 import numpy as np
 import serial
 
+# MSMF backend spams a C++ warning on every failed grabFrame (e.g. camera
+# unplugged) with no Python-side rate limit -- left running overnight this
+# fills a log file at ~25 lines/sec. Silence it; failures are still handled
+# in CameraController._capture_loop below.
+cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+
 from dwg_to_esp300 import (
     LaserPath,
     apply_fit_scale,
@@ -628,6 +634,8 @@ class CameraController:
 
     def _capture_loop(self) -> None:
         interval = 1.0 / CAMERA_STREAM_FPS
+        consecutive_failures = 0
+        max_consecutive_failures = CAMERA_STREAM_FPS * 5  # ~5s of dead reads
         while not self._stop.is_set():
             started = time.monotonic()
             with self._lock:
@@ -636,6 +644,7 @@ class CameraController:
                 break
             ok, frame = cap.read()
             if ok and frame is not None:
+                consecutive_failures = 0
                 with self._lock:
                     roi = self.roi
                 region = frame
@@ -651,6 +660,13 @@ class CameraController:
                     with self._lock:
                         self._latest_jpeg = buf.tobytes()
                         self._latest_stats = stats
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"[camera] {consecutive_failures} consecutive grabFrame failures, disconnecting")
+                    with self._lock:
+                        self._disconnect_locked()
+                    break
             elapsed = time.monotonic() - started
             time.sleep(max(0.0, interval - elapsed))
 
