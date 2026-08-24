@@ -1,0 +1,39 @@
+Claude-readable package manifest
+Package date: 2026-08-16
+
+Core implementation:
+- dwg_to_esp300.py
+- visualizer_server.py
+- visualizer/index.html
+- visualizer/styles.css
+- visualizer/app.js
+- visualizer/vendor/three.module.js
+
+Generated example:
+- example/adjust25design_esp300.py
+- example/adjust25design_esp300.ipynb
+- example/adjust25design_preview.svg
+- example/adjust25design_2passes_esp300.py
+- example/adjust25design_2passes_esp300.ipynb
+- example/adjust25design_2passes_preview.svg
+- example/adjust25design_outline_esp300.py
+- example/adjust25design_outline_preview.svg
+
+Documentation:
+- CLAUDE_README.md
+- LAB_PACKAGE_README.txt
+- README.md
+- requirements.txt
+- DWG_to_ESP300_Code_Overview_Lab_Report.pptx
+
+Launcher:
+- launch_dwg_to_esp300.ps1
+
+Excluded intentionally:
+- email drafts
+- .eml files
+- screenshots
+- __pycache__
+- uploads
+- old review package directories
+- temporary presentation build files

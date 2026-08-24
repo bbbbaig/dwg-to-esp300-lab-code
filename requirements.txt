@@ -1,0 +1,5 @@
+ezdxf>=1.4.3
+pyserial>=3.5
+
+# Optional, but useful for reading DWG directly without ODA File Converter.
+aspose-cad>=26.7
