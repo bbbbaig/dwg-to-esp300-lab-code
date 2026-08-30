@@ -178,8 +178,9 @@ def locate_spot_roi(
 @dataclass
 class FocusScanResult:
     best_z: float
-    samples: list[tuple[float, float]]  # (z, brightness)
+    samples: list[tuple[float, float]]  # (z, brightness) -- coarse + any inserted refinement points, sorted by z
     fit_used: bool
+    refined_points: int = 0
 
 
 def scan_focus_z(
@@ -191,6 +192,9 @@ def scan_focus_z(
     step_mm: float = 0.02,
     settle_s: float = 0.05,
     metric: str = "max",
+    direction: str = "both",
+    adaptive_rise_ratio: float | None = 1.5,
+    adaptive_subdivisions: int = 4,
 ) -> FocusScanResult:
     """Sweep Z around `center_z`, return the brightness-peak Z.
 
@@ -200,26 +204,61 @@ def scan_focus_z(
         most recent pulse (caller decides mean vs max, ROI, sample count).
     metric: label only, informational -- brightness scalar semantics are
         entirely up to read_brightness.
+    direction: "both" sweeps center_z +- range_mm (default). "down"/"up"
+        sweep only that one side (0 .. -range_mm / 0 .. +range_mm) -- use
+        this when the focus surface is known to lie on one side only, so
+        the sweep doesn't burn half its range and half its Z-safety budget
+        going the wrong way.
+    adaptive_rise_ratio: after the coarse pass, any adjacent pair of samples
+        whose brightness jumps by more than this ratio (either direction --
+        catches both edges of a spike) gets `adaptive_subdivisions` extra
+        samples inserted between them, at that pair's own spacing (not the
+        coarse step). This is what lets a fast, coarse sweep still resolve
+        a spot the beam only lights up sharply on: the scan stays fast
+        everywhere it's flat and only slows down where the signal actually
+        moves. Set to None (or <= 1) to disable and keep the raw coarse
+        grid only.
+    adaptive_subdivisions: extra points inserted per flagged interval.
 
     Returns the parabolic-vertex estimate when the peak sample has a
-    neighbor on both sides (sub-step resolution); otherwise returns the
-    raw best-sample Z.
+    neighbor on both sides (sub-step resolution, exact for unevenly spaced
+    neighbors too -- see below); otherwise returns the raw best-sample Z.
     """
     if range_mm <= 0 or step_mm <= 0:
         raise ValueError("range_mm and step_mm must be positive")
 
     n_steps = max(1, int(round(range_mm / step_mm)))
-    offsets = [i * step_mm for i in range(-n_steps, n_steps + 1)]
+    if direction == "both":
+        offsets = [i * step_mm for i in range(-n_steps, n_steps + 1)]
+    elif direction == "down":
+        offsets = [-i * step_mm for i in range(0, n_steps + 1)]
+    elif direction == "up":
+        offsets = [i * step_mm for i in range(0, n_steps + 1)]
+    else:
+        raise ValueError(f"Unknown direction {direction!r}; expected 'both', 'down', or 'up'")
 
-    samples: list[tuple[float, float]] = []
-    for offset in offsets:
-        z = center_z + offset
+    def measure(z: float) -> tuple[float, float]:
         move_z(z)
         if settle_s > 0:
             time.sleep(settle_s)
         fire_pulse()
-        brightness = read_brightness()
-        samples.append((z, brightness))
+        return (z, read_brightness())
+
+    samples: list[tuple[float, float]] = [measure(center_z + offset) for offset in offsets]
+
+    refined_points = 0
+    if adaptive_rise_ratio and adaptive_rise_ratio > 1 and adaptive_subdivisions > 0:
+        extra: list[tuple[float, float]] = []
+        for (z_prev, v_prev), (z_cur, v_cur) in zip(samples, samples[1:]):
+            spiked = v_cur > max(v_prev, 1e-9) * adaptive_rise_ratio or v_prev > max(v_cur, 1e-9) * adaptive_rise_ratio
+            if not spiked:
+                continue
+            sub_step = (z_cur - z_prev) / (adaptive_subdivisions + 1)
+            for k in range(1, adaptive_subdivisions + 1):
+                extra.append(measure(z_prev + sub_step * k))
+        if extra:
+            refined_points = len(extra)
+            samples = sorted(samples + extra, key=lambda s: s[0])
 
     peak_idx = max(range(len(samples)), key=lambda i: samples[i][1])
     best_z, _ = samples[peak_idx]
@@ -229,15 +268,22 @@ def scan_focus_z(
         z0, y0 = samples[peak_idx - 1]
         z1, y1 = samples[peak_idx]
         z2, y2 = samples[peak_idx + 1]
-        denom = (y0 - 2 * y1 + y2)
-        if abs(denom) > 1e-9:
-            # Vertex of the parabola through the three points around the peak.
-            vertex_offset = 0.5 * (y0 - y2) / denom
-            vertex_offset = max(-1.0, min(1.0, vertex_offset))  # clamp to +-1 step
-            best_z = z1 + vertex_offset * step_mm
-            fit_used = True
+        # Vertex of the parabola through the three points, exact for
+        # unevenly spaced z0/z1/z2 (falls back to the classic equal-step
+        # formula when spacing happens to be uniform).
+        d01 = z1 - z0
+        d12 = z2 - z1
+        if abs(d01) > 1e-12 and abs(d12) > 1e-12:
+            f01 = (y1 - y0) / d01
+            f12 = (y2 - y1) / d12
+            curvature = (f12 - f01) / (z2 - z0)  # nonzero <=> a real local extremum, not a flat/linear run
+            if abs(curvature) > 1e-9:
+                vertex = (z0 + z1) / 2 - f01 / (2 * curvature)
+                lo, hi = min(z0, z2), max(z0, z2)
+                best_z = min(max(vertex, lo), hi)  # clamp into the sampled neighborhood
+                fit_used = True
 
-    return FocusScanResult(best_z=best_z, samples=samples, fit_used=fit_used)
+    return FocusScanResult(best_z=best_z, samples=samples, fit_used=fit_used, refined_points=refined_points)
 
 
 # ---------------------------------------------------------------------------

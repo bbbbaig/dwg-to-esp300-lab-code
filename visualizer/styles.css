@@ -124,7 +124,7 @@ select {
 
 .shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 390px;
+  grid-template-columns: minmax(0, 1fr) 520px;
   gap: 12px;
   width: 100%;
   height: calc(100vh - 96px);
@@ -453,9 +453,9 @@ canvas {
 }
 
 .panel {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
   background: var(--pearl);
 }
 
@@ -465,7 +465,7 @@ canvas {
 
 .camera-panel-pinned .camera-view {
   aspect-ratio: auto;
-  height: 160px;
+  height: 220px;
 }
 
 .panel-tabs {
@@ -497,7 +497,7 @@ canvas {
 
 .panel-tab-body {
   min-height: 0;
-  overflow-y: auto;
+  flex: 1 1 auto;
 }
 
 .tab-pane.hidden {
@@ -614,6 +614,193 @@ canvas {
   font-variant-numeric: tabular-nums;
 }
 
+.focus-panel {
+  display: grid;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas);
+}
+
+.focus-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.focus-actions button {
+  flex: 1;
+}
+
+.focus-active-toggle {
+  justify-content: flex-start;
+  height: auto;
+  padding: 6px 12px;
+}
+
+.focus-active-toggle span {
+  white-space: normal;
+}
+
+.focus-chart-wrap {
+  position: relative;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--canvas);
+  padding: 6px;
+}
+
+.focus-chart {
+  display: block;
+  width: 100%;
+  height: 140px;
+  cursor: crosshair;
+}
+
+.focus-chart-hint {
+  position: absolute;
+  top: 4px;
+  right: 10px;
+  font-size: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.focus-chart-axis {
+  stroke: var(--muted);
+  stroke-width: 1;
+  font-size: 9px;
+}
+
+.focus-chart-grid {
+  stroke: var(--divider-soft);
+  stroke-width: 1;
+}
+
+.focus-chart-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1.6;
+}
+
+.focus-chart-line.live {
+  stroke-dasharray: 3 2;
+  opacity: 0.85;
+}
+
+.focus-chart-peak {
+  fill: var(--success);
+  stroke: var(--canvas);
+  stroke-width: 1.5;
+}
+
+.focus-chart-selection {
+  fill: rgba(0, 102, 204, 0.14);
+  stroke: var(--primary);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+}
+
+.focus-map-glass {
+  fill: none;
+  stroke: var(--hairline);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.focus-map-dot {
+  stroke: var(--canvas);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.focus-map-dot.pending {
+  fill: var(--parchment);
+  stroke: var(--hairline);
+  stroke-dasharray: 2 2;
+}
+
+.focus-map-dot.error {
+  fill: var(--danger);
+}
+
+.focus-details {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--parchment);
+  overflow: hidden;
+}
+
+.focus-details > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted-strong);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+
+.focus-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.focus-details > summary::after {
+  content: "+";
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.focus-details[open] > summary::after {
+  content: "\2212";
+}
+
+.focus-details[open] > summary {
+  border-bottom: 1px solid var(--hairline);
+}
+
+.focus-details > *:not(summary) {
+  margin: 10px 14px;
+}
+
+.focus-details > summary + * {
+  margin-top: 12px;
+}
+
+.focus-details > *:last-child {
+  margin-bottom: 14px;
+}
+
+.focus-custom {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--parchment);
+}
+
+.focus-custom label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.focus-custom select,
+.focus-custom input {
+  width: 100%;
+}
+
+.focus-custom button {
+  grid-column: 1 / -1;
+}
+
 .jog-connect {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -676,12 +863,12 @@ canvas {
 .jog-step-options button {
   flex: 1;
   min-width: 0;
-  height: 28px;
+  height: 34px;
   padding: 0;
   border-color: transparent;
   background: transparent;
   color: var(--muted-strong);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .jog-step-options button.active {
@@ -694,18 +881,48 @@ canvas {
 .jog-pad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  max-width: 220px;
+  gap: 10px;
+  max-width: 320px;
   justify-self: center;
 }
 
 .jog-key {
-  height: 44px;
+  height: 64px;
+  font-size: 15px;
   font-weight: 600;
+  transition: transform 0.06s ease, background 0.06s ease, color 0.06s ease;
+}
+
+/* Explicit held-state feedback, applied by JS for BOTH pointer holds and
+   keyboard holds (arrow keys/PageUp/PageDown don't trigger :active at all,
+   so without this a keyboard-driven jog gives no visual confirmation of
+   which direction is firing). */
+.jog-key.pressed {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+  transform: scale(0.94);
+}
+
+.jog-pad {
+  border-radius: 14px;
+  transition: box-shadow 0.15s ease;
+}
+
+.jog-pad.blocked {
+  box-shadow: 0 0 0 3px var(--danger);
+}
+
+.jog-blocked-text {
+  min-height: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger);
+  text-align: center;
 }
 
 .jog-estop {
-  height: 44px;
+  height: 64px;
   border-color: var(--danger);
   background: var(--danger);
   color: #ffffff;
@@ -719,11 +936,13 @@ canvas {
 
 .jog-z {
   display: flex;
-  gap: 8px;
+  gap: 10px;
 }
 
 .jog-z button {
   flex: 1;
+  height: 52px;
+  font-size: 14px;
 }
 
 .jog-position {
@@ -731,6 +950,16 @@ canvas {
   font-weight: 600;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+}
+
+.jog-limit-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.jog-limit-text.near-limit {
+  color: var(--danger);
 }
 
 .jog-goto {

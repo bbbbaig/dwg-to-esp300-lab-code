@@ -48,6 +48,28 @@ const cameraStatusText = document.getElementById("cameraStatusText");
 const cameraStream = document.getElementById("cameraStream");
 const cameraPlaceholder = document.getElementById("cameraPlaceholder");
 const cameraBrightnessText = document.getElementById("cameraBrightnessText");
+const cameraSpotText = document.getElementById("cameraSpotText");
+const focusScanButton = document.getElementById("focusScanButton");
+const focusScanWideButton = document.getElementById("focusScanWideButton");
+const focusScanNarrowButton = document.getElementById("focusScanNarrowButton");
+const focusSurveyNarrowToggle = document.getElementById("focusSurveyNarrowToggle");
+const focusCustomDirection = document.getElementById("focusCustomDirection");
+const focusCustomRange = document.getElementById("focusCustomRange");
+const focusCustomStep = document.getElementById("focusCustomStep");
+const focusCustomSettle = document.getElementById("focusCustomSettle");
+const focusCustomButton = document.getElementById("focusCustomButton");
+const focusChart = document.getElementById("focusChart");
+const focusSelectionText = document.getElementById("focusSelectionText");
+const focusActiveToggle = document.getElementById("focusActiveToggle");
+const focusStatusText = document.getElementById("focusStatusText");
+const focusResultText = document.getElementById("focusResultText");
+const focusLatencyButton = document.getElementById("focusLatencyButton");
+const focusLatencyText = document.getElementById("focusLatencyText");
+const focusSurveyButton = document.getElementById("focusSurveyButton");
+const focusSurveyStopButton = document.getElementById("focusSurveyStopButton");
+const focusSurveyStatusText = document.getElementById("focusSurveyStatusText");
+const focusSurveyMap = document.getElementById("focusSurveyMap");
+const focusSurveyMapTip = document.getElementById("focusSurveyMapTip");
 const jogPort = document.getElementById("jogPort");
 const jogBaud = document.getElementById("jogBaud");
 const jogDryRun = document.getElementById("jogDryRun");
@@ -71,6 +93,8 @@ const jogRunButton = document.getElementById("jogRunButton");
 const jogRunStopButton = document.getElementById("jogRunStopButton");
 const jogRunStatusText = document.getElementById("jogRunStatusText");
 const jogPositionText = document.getElementById("jogPositionText");
+const jogLimitText = document.getElementById("jogLimitText");
+const jogBlockedText = document.getElementById("jogBlockedText");
 
 const newManualButton = document.getElementById("newManualButton");
 const addShapeButton = document.getElementById("addShapeButton");
@@ -85,6 +109,11 @@ const rectW = document.getElementById("rectW");
 const rectH = document.getElementById("rectH");
 const circleX = document.getElementById("circleX");
 const circleY = document.getElementById("circleY");
+const circleDiameter = document.getElementById("circleDiameter");
+const spiralX = document.getElementById("spiralX");
+const spiralY = document.getElementById("spiralY");
+const spiralRadius = document.getElementById("spiralRadius");
+const spiralTurns = document.getElementById("spiralTurns");
 
 let session = null;
 let motion = null;
@@ -120,7 +149,6 @@ let stageYaw = -0.72;
 let stagePitch = 0.58;
 let stageDistance = 58;
 
-const FIXED_MANUAL_CIRCLE_DIAMETER_MM = 2;
 const Z_VISUAL_SCALE = 8;
 const GLASS_THICKNESS = 0.14;
 const GLASS_CENTER_Y = -0.035;
@@ -185,6 +213,33 @@ function makeCirclePoints(cx, cy, diameter, segments = 96) {
   return points;
 }
 
+function makeSpiralPoints(cx, cy, maxR, turns, pointsPerTurn = 48) {
+  const totalSegments = Math.max(2, Math.round(turns * pointsPerTurn));
+  const points = [];
+  for (let i = 0; i <= totalSegments; i += 1) {
+    const t = i / totalSegments; // 0 (center) -> 1 (outer edge)
+    const angle = t * turns * Math.PI * 2;
+    const r = t * maxR;
+    points.push([cx + Math.cos(angle) * r, cy + Math.sin(angle) * r]);
+  }
+  return points;
+}
+
+function buildSpiralShapePath() {
+  const cx = readNumber(spiralX, "CX");
+  const cy = readNumber(spiralY, "CY");
+  const maxR = readNumber(spiralRadius, "Max radius");
+  const turns = readNumber(spiralTurns, "Turns");
+  if (maxR <= 0) throw new Error("Max radius must be positive.");
+  if (turns <= 0) throw new Error("Turns must be positive.");
+  return {
+    layer: `Manual spiral R${maxR}mm x${turns}`,
+    entityType: "MANUAL_SPIRAL",
+    closed: false,
+    points: makeSpiralPoints(cx, cy, maxR, turns),
+  };
+}
+
 function makeShapePath() {
   if (shapeMode === "line") {
     const x1 = readNumber(lineX1, "X1");
@@ -223,13 +278,16 @@ function makeShapePath() {
     };
   }
 
+  if (shapeMode === "spiral") return buildSpiralShapePath();
+
   const cx = readNumber(circleX, "CX");
   const cy = readNumber(circleY, "CY");
+  const diameter = readNumber(circleDiameter, "Diameter");
   return {
-    layer: "Manual circle 2mm",
+    layer: `Manual circle ${diameter}mm`,
     entityType: "MANUAL_CIRCLE",
     closed: true,
-    points: makeCirclePoints(cx, cy, FIXED_MANUAL_CIRCLE_DIAMETER_MM),
+    points: makeCirclePoints(cx, cy, diameter),
   };
 }
 
@@ -313,6 +371,7 @@ function cameraApplyStatus(data) {
     cameraStream.removeAttribute("src");
     cameraPlaceholder.style.display = "flex";
     cameraBrightnessText.textContent = "Brightness: -";
+    cameraSpotText.textContent = "Spot: -";
     return;
   }
   cameraStatusText.textContent = `Connected: index ${data.index}`;
@@ -327,6 +386,13 @@ function cameraApplyStatus(data) {
     cameraBrightnessText.textContent = `Brightness: mean ${brightness.mean.toFixed(1)} / max ${brightness.max.toFixed(1)}`;
   } else {
     cameraBrightnessText.textContent = "Brightness: -";
+  }
+  const peak = data.peak;
+  if (peak && peak.n_blobs > 0) {
+    const pos = peak.x != null ? `x ${peak.x.toFixed(0)}, y ${peak.y.toFixed(0)}` : "no centroid";
+    cameraSpotText.textContent = `Peak: score ${peak.score.toFixed(0)} / ${peak.n_blobs} blob(s) / ${pos}`;
+  } else {
+    cameraSpotText.textContent = "Peak: not found";
   }
 }
 
@@ -363,6 +429,523 @@ async function cameraDisconnect() {
   }
 }
 
+// Click the blob you actually want on the live feed: several red+core
+// candidates can be onscreen at once (reflections, stray hot spots), and
+// only the user knows which one is the real target. This sets the
+// continuity anchor server-side so frame-to-frame tracking locks onto
+// whichever candidate lands nearest the click, instead of guessing by size.
+async function cameraSelectTarget(evt) {
+  if (!cameraConnected || !cameraStream.naturalWidth) return;
+  const rect = cameraStream.getBoundingClientRect();
+  const scaleX = cameraStream.naturalWidth / rect.width;
+  const scaleY = cameraStream.naturalHeight / rect.height;
+  const x = (evt.clientX - rect.left) * scaleX;
+  const y = (evt.clientY - rect.top) * scaleY;
+  try {
+    await fetchJson("/api/camera/select-target", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x, y }),
+    });
+    setStatus(`Target anchor set at (${x.toFixed(0)}, ${y.toFixed(0)}).`);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+let focusPollTimer = null;
+let focusSuppressToggle = false;
+
+function focusApplyStatus(data) {
+  if (data.focusTiming) focusTimingConfig = data.focusTiming;
+  if (data.scanning) {
+    focusStatusText.textContent = `Scanning (${data.stage || "..."})`;
+    focusStatusText.classList.add("live");
+  } else if (data.error) {
+    focusStatusText.textContent = `Error: ${data.error}`;
+    focusStatusText.classList.remove("live");
+  } else if (data.active) {
+    focusStatusText.textContent = "Active - watching for X/Y moves";
+    focusStatusText.classList.add("live");
+  } else {
+    focusStatusText.textContent = data.hasBaseline ? "Idle" : "Idle (no scan yet)";
+    focusStatusText.classList.remove("live");
+  }
+
+  const result = data.lastResult;
+  if (result) {
+    const when = new Date(result.timestamp * 1000).toLocaleTimeString();
+    const peak = result.peakBrightness != null ? result.peakBrightness.toFixed(1) : "-";
+    const kind = result.label || (result.usedWide ? "wide+narrow" : "narrow");
+    const offset = result.bestOffsetMm >= 0 ? `+${result.bestOffsetMm.toFixed(4)}` : result.bestOffsetMm.toFixed(4);
+    const trend = data.planeSamples >= 3 ? ` / trend fit (${data.planeSamples} pts)` : ` / trend: need ${3 - data.planeSamples} more pt(s)`;
+    focusResultText.textContent = `Last (${kind}): moved ${offset} mm, peak blob score ${peak} @ ${when}${trend}`;
+  } else {
+    focusResultText.textContent = "No scan yet.";
+  }
+  if (data.scanning && data.liveSamples && data.liveSamples.length > 1) {
+    renderFocusChartLive(data.liveStage, data.liveSamples);
+  } else {
+    renderFocusChart(result);
+  }
+
+  if (!focusSuppressToggle) focusActiveToggle.checked = Boolean(data.active);
+
+  const lc = data.latencyCheck;
+  if (lc) {
+    const when = new Date(lc.timestamp * 1000).toLocaleTimeString();
+    const deltaUm = (lc.deltaMm * 1000).toFixed(1);
+    const lagMs = (lc.impliedLagS * 1000).toFixed(0);
+    focusLatencyText.textContent =
+      `slow ${lc.slowBestOffsetMm >= 0 ? "+" : ""}${lc.slowBestOffsetMm.toFixed(4)}mm vs fast ${lc.fastBestOffsetMm >= 0 ? "+" : ""}${lc.fastBestOffsetMm.toFixed(4)}mm ` +
+      `-> gap ${deltaUm}µm (~${lagMs}ms implied lag) @ ${when}`;
+  } else if (!data.scanning) {
+    focusLatencyText.textContent = "No timing check yet.";
+  }
+
+  const sv = data.survey;
+  if (data.surveying) {
+    focusSurveyStatusText.textContent = `Surveying: point ${sv.index}/${sv.total}${data.scanning ? ` (${data.stage || "scanning"})` : ""}`;
+    focusSurveyStatusText.classList.add("live");
+  } else if (sv) {
+    const failed = sv.results.filter((r) => r.error).length;
+    focusSurveyStatusText.textContent =
+      `Survey done: ${sv.results.length}/${sv.total} points` + (failed ? `, ${failed} failed` : "") + (sv.error ? ` - stopped: ${sv.error}` : "");
+    focusSurveyStatusText.classList.remove("live");
+  } else {
+    focusSurveyStatusText.textContent = "No survey yet.";
+    focusSurveyStatusText.classList.remove("live");
+  }
+  renderSurveyMap(sv);
+}
+
+// In-panel Z-offset vs blob-score chart for the last completed scan, with
+// drag-to-select: dragging a range on the graph computes a center offset +
+// half-width relative to the CURRENT stage position (samples are offsets
+// from wherever that particular scan started, not absolute Z -- see
+// _run_stage server-side), pre-fills the custom-scan Range/Step fields, and
+// stashes the center offset for focusRunCustomScan() to send along. This is
+// what lets picking a peak on the graph immediately chain into a finer scan
+// right there, and picking again on THAT scan's fresh graph chain further.
+const FOCUS_CHART_PLOT = { padL: 42, padR: 8, padT: 8, padB: 20, w: 480, h: 200 };
+let focusChartSamples = null;
+let focusChartBestZ = null;
+let focusChartTimestamp = null;
+let focusSelection = null; // {min, max} in offset-mm units, in the currently-rendered scan's own frame
+let focusSelectionCenterOffsetMm = 0;
+let focusTimingConfig = null; // {speedMmS, mechSettleS, exposureMarginS, narrowRangeMm, narrowStepMm}, from status polls
+
+function focusChartClear() {
+  focusChart.innerHTML = "";
+  focusChartSamples = null;
+  focusChartBestZ = null;
+  focusSelection = null;
+  focusSelectionCenterOffsetMm = 0;
+  focusSelectionText.textContent = "No range selected.";
+}
+
+function drawFocusChartCore(samples, peakZ, opts) {
+  const { padL, padR, padT, padB, w, h } = FOCUS_CHART_PLOT;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  const xs = samples.map((s) => s[0]);
+  const ys = samples.map((s) => s[1]);
+  const xMin = Math.min(...xs);
+  const xMax = Math.max(...xs);
+  const yMin = Math.min(...ys);
+  const yMax = Math.max(...ys);
+  const yPad = (yMax - yMin) * 0.08 || 1;
+  const yLo = yMin - yPad;
+  const yHi = yMax + yPad;
+
+  const xPix = (x) => padL + ((x - xMin) / (xMax - xMin || 1)) * innerW;
+  const yPix = (y) => padT + innerH - ((y - yLo) / (yHi - yLo || 1)) * innerH;
+  const xData = (px) => xMin + ((px - padL) / innerW) * (xMax - xMin);
+
+  const ns = "http://www.w3.org/2000/svg";
+  function el(tag, attrs) {
+    const e = document.createElementNS(ns, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  focusChart.innerHTML = "";
+  focusChart.setAttribute("viewBox", `0 0 ${w} ${h}`);
+
+  const yTicks = 3;
+  for (let i = 0; i <= yTicks; i += 1) {
+    const py = yPix(yLo + (i / yTicks) * (yHi - yLo));
+    focusChart.appendChild(el("line", { class: "focus-chart-grid", x1: padL, x2: w - padR, y1: py, y2: py }));
+  }
+  for (const xv of [xMin, (xMin + xMax) / 2, xMax]) {
+    const label = el("text", { class: "focus-chart-axis", x: xPix(xv), y: h - 4, "text-anchor": "middle" });
+    label.textContent = xv.toFixed(3);
+    focusChart.appendChild(label);
+  }
+  focusChart.appendChild(el("line", { class: "focus-chart-axis", x1: padL, x2: w - padR, y1: h - padB, y2: h - padB }));
+
+  const d = samples.map((s, i) => `${i === 0 ? "M" : "L"} ${xPix(s[0]).toFixed(2)} ${yPix(s[1]).toFixed(2)}`).join(" ");
+  focusChart.appendChild(el("path", { class: opts.interactive ? "focus-chart-line" : "focus-chart-line live", d }));
+
+  if (peakZ != null) {
+    let nearestIdx = 0;
+    for (let i = 1; i < samples.length; i += 1) {
+      if (Math.abs(samples[i][0] - peakZ) < Math.abs(samples[nearestIdx][0] - peakZ)) nearestIdx = i;
+    }
+    focusChart.appendChild(el("circle", { class: "focus-chart-peak", cx: xPix(peakZ), cy: yPix(samples[nearestIdx][1]), r: 4 }));
+  }
+
+  if (!opts.interactive) return; // live/in-progress: read-only, no drag-select UI
+
+  const selRect = el("rect", { class: "focus-chart-selection", y: padT, height: innerH, x: 0, width: 0, visibility: "hidden" });
+  focusChart.appendChild(selRect);
+  if (focusSelection) {
+    const x0 = xPix(focusSelection.min);
+    const x1 = xPix(focusSelection.max);
+    selRect.setAttribute("x", Math.min(x0, x1));
+    selRect.setAttribute("width", Math.max(1, Math.abs(x1 - x0)));
+    selRect.setAttribute("visibility", "visible");
+  }
+
+  const hit = el("rect", { x: padL, y: padT, width: innerW, height: innerH, fill: "transparent" });
+  focusChart.appendChild(hit);
+
+  let dragStartData = null;
+  function pointToData(evt) {
+    const rect = focusChart.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) * (w / rect.width);
+    return Math.min(xMax, Math.max(xMin, xData(px)));
+  }
+  hit.addEventListener("pointerdown", (evt) => {
+    dragStartData = pointToData(evt);
+    hit.setPointerCapture(evt.pointerId);
+  });
+  hit.addEventListener("pointermove", (evt) => {
+    if (dragStartData == null) return;
+    const cur = pointToData(evt);
+    const lo = Math.min(dragStartData, cur);
+    const hi = Math.max(dragStartData, cur);
+    selRect.setAttribute("x", xPix(lo));
+    selRect.setAttribute("width", Math.max(1, xPix(hi) - xPix(lo)));
+    selRect.setAttribute("visibility", "visible");
+  });
+  hit.addEventListener("pointerup", (evt) => {
+    if (dragStartData == null) return;
+    const cur = pointToData(evt);
+    const lo = Math.min(dragStartData, cur);
+    const hi = Math.max(dragStartData, cur);
+    dragStartData = null;
+    if (hi - lo < (xMax - xMin) * 0.01) {
+      selRect.setAttribute("visibility", focusSelection ? "visible" : "hidden");
+      return; // too small to be a deliberate drag -- treat as a stray click
+    }
+    focusSelection = { min: lo, max: hi };
+    applyFocusSelection();
+  });
+}
+
+function renderFocusChart(result) {
+  if (!result || !result.samples) {
+    focusChartClear();
+    return;
+  }
+  const samples = result.samples.narrow && result.samples.narrow.length > 1 ? result.samples.narrow : result.samples.wide || [];
+  if (samples.length < 2) {
+    focusChartClear();
+    return;
+  }
+  if (result.timestamp === focusChartTimestamp) {
+    // Same scan as last render (just another 400ms status poll finding
+    // nothing new) -- skip the redraw. drawFocusChartCore rebuilds the
+    // whole SVG from scratch, which would tear out the hit-rect a
+    // drag-select is mid-flight on and silently drop the gesture.
+    return;
+  }
+  // A fresh scan landed -- any prior selection was drawn against the old
+  // graph and no longer corresponds to anything real.
+  focusChartTimestamp = result.timestamp;
+  focusSelection = null;
+  focusSelectionCenterOffsetMm = 0;
+  focusSelectionText.textContent = "No range selected.";
+  focusChartSamples = samples;
+  focusChartBestZ = result.bestOffsetMm;
+  focusChartHint.textContent = "Drag on the graph to select a range around a peak.";
+  drawFocusChartCore(samples, focusChartBestZ, { interactive: true });
+}
+
+// Live, read-only view of the scan currently in progress -- polled from
+// data.liveSamples every 400ms while data.scanning is true, so the curve
+// visibly grows point-by-point instead of the panel sitting blank/stale
+// for the 1-50s a scan can take. Swaps back to the interactive final chart
+// (renderFocusChart) the moment the scan completes and lastResult updates.
+function renderFocusChartLive(stage, samples) {
+  if (!samples || samples.length < 2) return;
+  let peakIdx = 0;
+  for (let i = 1; i < samples.length; i += 1) {
+    if (samples[i][1] > samples[peakIdx][1]) peakIdx = i;
+  }
+  focusChartHint.textContent = `Live: ${stage || "scanning"} - ${samples.length} pt(s), running peak ${samples[peakIdx][0].toFixed(4)}mm`;
+  drawFocusChartCore(samples, samples[peakIdx][0], { interactive: false });
+}
+
+function applyFocusSelection() {
+  if (!focusSelection || focusChartBestZ == null) return;
+  const mid = (focusSelection.min + focusSelection.max) / 2;
+  const halfWidth = Math.max(0.0005, (focusSelection.max - focusSelection.min) / 2);
+  focusSelectionCenterOffsetMm = mid - focusChartBestZ;
+  focusCustomRange.value = halfWidth.toFixed(5);
+  focusCustomStep.value = Math.max(0.0002, halfWidth / 20).toFixed(5);
+  const sign = focusSelectionCenterOffsetMm >= 0 ? "+" : "";
+  focusSelectionText.textContent =
+    `Selected ${focusSelection.min.toFixed(4)} to ${focusSelection.max.toFixed(4)} mm -> ` +
+    `center ${sign}${focusSelectionCenterOffsetMm.toFixed(4)}mm from current position, half-width ${halfWidth.toFixed(4)}mm. ` +
+    "Adjust Step/Settle below, then Run custom scan.";
+}
+
+// X/Y survey map: fills in live from data.survey.results while a survey
+// runs (polled every 400ms same as everything else here), and stays put
+// showing the finished map afterward. focusSurveyWaypoints (set by
+// focusStartSurvey) is client-side only -- it's what lets not-yet-visited
+// stops show as faint pending dots; the server only echoes completed
+// results, so a page reload mid-survey just loses the pending dots, not
+// the real data.
+let focusSurveyWaypoints = [];
+
+function renderSurveyMap(survey) {
+  const svg = focusSurveyMap;
+  const hasPending = focusSurveyWaypoints.length > 0;
+  const hasResults = survey && survey.results.length > 0;
+  if (!hasPending && !hasResults) {
+    svg.innerHTML = "";
+    focusSurveyMapTip.textContent = "Hover a point for detail.";
+    return;
+  }
+
+  const w = 480, h = 260, padL = 36, padR = 8, padT = 8, padB = 18;
+  const innerW = w - padL - padR, innerH = h - padT - padB;
+
+  const xs = [], ys = [];
+  for (const [x, y] of focusSurveyWaypoints) { xs.push(x); ys.push(y); }
+  if (survey) for (const r of survey.results) { xs.push(r.x); ys.push(r.y); }
+  let xMin = Math.min(...xs), xMax = Math.max(...xs), yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const xSpan = Math.max(xMax - xMin, 0.5), ySpan = Math.max(yMax - yMin, 0.5);
+  xMin -= xSpan * 0.1; xMax += xSpan * 0.1; yMin -= ySpan * 0.1; yMax += ySpan * 0.1;
+
+  const xPix = (x) => padL + ((x - xMin) / (xMax - xMin)) * innerW;
+  const yPix = (y) => padT + innerH - ((y - yMin) / (yMax - yMin)) * innerH; // Y grows upward on the glass
+
+  const ns = "http://www.w3.org/2000/svg";
+  function el(tag, attrs) {
+    const e = document.createElementNS(ns, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  svg.innerHTML = "";
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+
+  for (const xv of [xMin, (xMin + xMax) / 2, xMax]) {
+    svg.appendChild(el("line", { class: "focus-chart-grid", x1: xPix(xv), x2: xPix(xv), y1: padT, y2: h - padB }));
+  }
+  for (const yv of [yMin, (yMin + yMax) / 2, yMax]) {
+    svg.appendChild(el("line", { class: "focus-chart-grid", x1: padL, x2: w - padR, y1: yPix(yv), y2: yPix(yv) }));
+  }
+  svg.appendChild(el("line", { class: "focus-chart-axis", x1: padL, x2: w - padR, y1: h - padB, y2: h - padB }));
+  svg.appendChild(el("line", { class: "focus-chart-axis", x1: padL, x2: padL, y1: padT, y2: h - padB }));
+
+  // Usable glass circle, if a design session's metadata has one, for spatial reference.
+  const meta = session && session.metadata;
+  if (meta && meta.usable_center_xy_mm && meta.usable_diameter_mm) {
+    const [cx, cy] = meta.usable_center_xy_mm;
+    const rMm = meta.usable_diameter_mm / 2;
+    const rPix = (rMm / (xMax - xMin)) * innerW;
+    svg.appendChild(el("circle", { class: "focus-map-glass", cx: xPix(cx), cy: yPix(cy), r: rPix }));
+  }
+
+  const visited = new Set((survey ? survey.results : []).map((r) => `${r.x},${r.y}`));
+  for (const [x, y] of focusSurveyWaypoints) {
+    if (visited.has(`${x},${y}`)) continue; // will be drawn as a real result below
+    svg.appendChild(el("circle", { class: "focus-map-dot pending", cx: xPix(x), cy: yPix(y), r: 4 }));
+  }
+
+  if (survey && survey.results.length) {
+    const scores = survey.results.filter((r) => r.result && !r.error).map((r) => r.result.peakBrightness || 0);
+    const sMin = Math.min(...scores, 0), sMax = Math.max(...scores, 1);
+    for (const r of survey.results) {
+      const px = xPix(r.x), py = yPix(r.y);
+      let dot;
+      if (r.error) {
+        dot = el("circle", { class: "focus-map-dot error", cx: px, cy: py, r: 6 });
+      } else {
+        const score = r.result ? r.result.peakBrightness || 0 : 0;
+        const t = sMax > sMin ? (score - sMin) / (sMax - sMin) : 0.5;
+        dot = el("circle", {
+          class: "focus-map-dot",
+          cx: px, cy: py, r: 5 + t * 7,
+          fill: "var(--primary)",
+          "fill-opacity": (0.35 + t * 0.65).toFixed(2),
+        });
+      }
+      dot.addEventListener("pointerenter", () => {
+        if (r.error) {
+          focusSurveyMapTip.textContent = `#${r.index + 1} X ${r.x.toFixed(3)} / Y ${r.y.toFixed(3)} -- failed: ${r.error}`;
+        } else {
+          const res = r.result;
+          const offset = res.bestOffsetMm >= 0 ? `+${res.bestOffsetMm.toFixed(4)}` : res.bestOffsetMm.toFixed(4);
+          focusSurveyMapTip.textContent =
+            `#${r.index + 1} X ${r.x.toFixed(3)} / Y ${r.y.toFixed(3)} -- moved ${offset}mm, score ${(res.peakBrightness || 0).toFixed(0)}`;
+        }
+      });
+      svg.appendChild(dot);
+    }
+  }
+}
+
+async function focusRefreshStatus() {
+  try {
+    const data = await fetchJson("/api/focus/status");
+    focusApplyStatus(data);
+  } catch (error) {
+    // Transient poll failures are ignored, same as jog/camera status polling.
+  }
+}
+
+async function focusScan(wide, narrowOnly = false) {
+  try {
+    const data = await fetchJson("/api/focus/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wide: Boolean(wide), narrowOnly: Boolean(narrowOnly) }),
+    });
+    focusApplyStatus(data);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function focusSetActive(enabled) {
+  focusSuppressToggle = true;
+  try {
+    const data = await fetchJson("/api/focus/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    focusApplyStatus(data);
+  } catch (error) {
+    setStatus(error.message);
+    focusActiveToggle.checked = !enabled;
+  } finally {
+    focusSuppressToggle = false;
+  }
+}
+
+const SURVEY_WAYPOINT_SPACING_MM = 8.0; // ~25s/point at production narrow-scan settings -- keep this generous or a full spiral survey takes an hour+
+const SURVEY_SECONDS_PER_POINT = 25; // rough -- matches production narrow scan duration
+
+function findSpiralPathPoints() {
+  if (!session) return null;
+  const spiral = session.paths.find((p) => p.entityType === "MANUAL_SPIRAL");
+  return spiral ? spiral.points : null;
+}
+
+function resamplePolylineBySpacing(points, spacing) {
+  if (points.length === 0) return [];
+  const waypoints = [points[0]];
+  let accum = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const [x0, y0] = points[i - 1];
+    const [x1, y1] = points[i];
+    accum += Math.hypot(x1 - x0, y1 - y0);
+    if (accum >= spacing) {
+      waypoints.push(points[i]);
+      accum = 0;
+    }
+  }
+  const last = points[points.length - 1];
+  const lastWp = waypoints[waypoints.length - 1];
+  if (Math.hypot(last[0] - lastWp[0], last[1] - lastWp[1]) > 1e-6) waypoints.push(last);
+  return waypoints;
+}
+
+async function focusStartSurvey() {
+  let points = findSpiralPathPoints();
+  if (!points) {
+    // No spiral on the canvas -- use the default spiral (current Spiral-tab
+    // field values) for survey waypoints WITHOUT merging it into the loaded
+    // design session. Survey is a diagnostic path, not a shape to cut, and
+    // persisting it into session.paths would draw it on top of (and get
+    // exported alongside) whatever drawing the user already has loaded.
+    try {
+      points = buildSpiralShapePath().points;
+    } catch (error) {
+      setStatus(error.message);
+      return;
+    }
+  }
+  const waypoints = resamplePolylineBySpacing(points, SURVEY_WAYPOINT_SPACING_MM);
+  const etaMin = Math.round((waypoints.length * SURVEY_SECONDS_PER_POINT) / 60);
+  if (!window.confirm(`Survey ${waypoints.length} points along the spiral (~${etaMin} min at this scan speed). Start?`)) return;
+  try {
+    const data = await fetchJson("/api/focus/survey/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ waypoints, narrowOnly: focusSurveyNarrowToggle.checked }),
+    });
+    focusSurveyWaypoints = waypoints;
+    focusApplyStatus(data);
+    setStatus(`Survey started: ${waypoints.length} waypoints.`);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function focusStopSurvey() {
+  try {
+    const data = await fetchJson("/api/focus/survey/stop", { method: "POST" });
+    focusApplyStatus(data);
+    setStatus("Survey stop requested.");
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function focusRunCustomScan() {
+  const rangeMm = Number(focusCustomRange.value);
+  const stepMm = Number(focusCustomStep.value);
+  const settleS = Number(focusCustomSettle.value);
+  if (!(rangeMm > 0) || !(stepMm > 0) || !(settleS >= 0)) {
+    setStatus("Enter a positive range/step and a non-negative settle time.");
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/focus/scan/custom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        direction: focusCustomDirection.value,
+        rangeMm,
+        stepMm,
+        settleS,
+        centerOffsetMm: focusSelectionCenterOffsetMm,
+      }),
+    });
+    focusApplyStatus(data);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function focusRunLatencyCheck() {
+  try {
+    const data = await fetchJson("/api/focus/latency-check", { method: "POST" });
+    focusApplyStatus(data);
+    setStatus("Timing check running (slow reference pass, then fast pass) - watch the Autofocus panel.");
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
 let jogConnected = false;
 let jogStepMm = 0.1;
 let jogBusy = false;
@@ -375,6 +958,20 @@ function jogApplyStatus(data) {
   const focusTrim = Number(data.focusTrimMm || 0);
   const trimText = Math.abs(focusTrim) > 0.0001 ? ` (focus trim ${focusTrim >= 0 ? "+" : ""}${focusTrim.toFixed(3)})` : "";
   jogPositionText.textContent = `X ${pos.x.toFixed(3)} / Y ${pos.y.toFixed(3)} / Z ${pos.z.toFixed(3)}${trimText}`;
+
+  const limit = data.limit;
+  if (limit) {
+    const distToEdge = limit.radiusMm - Math.hypot(pos.x - limit.centerX, pos.y - limit.centerY);
+    const zHeadroom = limit.zRangeMm - Math.abs(focusTrim);
+    const nearXY = distToEdge < Math.max(0.5, limit.radiusMm * 0.05);
+    const nearZ = zHeadroom < Math.max(0.2, limit.zRangeMm * 0.1);
+    jogLimitText.textContent = `${distToEdge.toFixed(2)}mm to XY limit / ${zHeadroom.toFixed(2)}mm of Z headroom`;
+    jogLimitText.classList.toggle("near-limit", nearXY || nearZ);
+  } else {
+    jogLimitText.textContent = "";
+    jogLimitText.classList.remove("near-limit");
+  }
+
   jogGotoX.placeholder = pos.x.toFixed(3);
   jogGotoY.placeholder = pos.y.toFixed(3);
   jogGotoZ.placeholder = pos.z.toFixed(3);
@@ -436,6 +1033,19 @@ async function jogDisconnect() {
   }
 }
 
+let jogBlockedFlashTimer = null;
+
+function jogShowBlocked(message) {
+  // Blocked-move feedback lands right at the pad (where the operator's eyes
+  // already are while jogging), not just the page-top status line -- a
+  // move rejected near a limit was otherwise silent unless you happened to
+  // be looking at the far-away status text.
+  jogBlockedText.textContent = message;
+  jogPad.classList.add("blocked");
+  clearTimeout(jogBlockedFlashTimer);
+  jogBlockedFlashTimer = setTimeout(() => jogPad.classList.remove("blocked"), 400);
+}
+
 async function jogSendMove(axis, dir) {
   if (jogBusy || !jogConnected) return;
   jogBusy = true;
@@ -448,12 +1058,29 @@ async function jogSendMove(axis, dir) {
       body: JSON.stringify({ axis, deltaMm: dir * jogStepMm, speedMmS }),
     });
     jogApplyStatus(data);
+    jogBlockedText.textContent = "";
   } catch (error) {
     setStatus(error.message);
+    jogShowBlocked(error.message);
     stopJogHold();
   } finally {
     jogBusy = false;
   }
+}
+
+const JOG_KEY_ELEMENTS = new Map(); // "axis:dir" -> button, filled once the pad buttons are wired up below
+let jogPressedButton = null;
+
+function jogSetPressed(axis, dir) {
+  const button = JOG_KEY_ELEMENTS.get(`${axis}:${dir}`);
+  if (jogPressedButton && jogPressedButton !== button) jogPressedButton.classList.remove("pressed");
+  if (button) button.classList.add("pressed");
+  jogPressedButton = button || null;
+}
+
+function jogClearPressed() {
+  if (jogPressedButton) jogPressedButton.classList.remove("pressed");
+  jogPressedButton = null;
 }
 
 function startJogHold(axis, dir) {
@@ -462,6 +1089,7 @@ function startJogHold(axis, dir) {
     return;
   }
   stopJogHold();
+  jogSetPressed(axis, dir);
   jogSendMove(axis, dir);
   jogHoldTimer = setInterval(() => jogSendMove(axis, dir), 120);
 }
@@ -471,6 +1099,7 @@ function stopJogHold() {
     clearInterval(jogHoldTimer);
     jogHoldTimer = null;
   }
+  jogClearPressed();
 }
 
 async function jogHome() {
@@ -1661,6 +2290,7 @@ for (const button of jogStepOptions.querySelectorAll("button")) {
 for (const button of [...jogPad.querySelectorAll(".jog-key"), ...jogZRow.querySelectorAll(".jog-key")]) {
   const axis = button.dataset.axis;
   const dir = Number(button.dataset.dir);
+  JOG_KEY_ELEMENTS.set(`${axis}:${dir}`, button);
   button.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     button.setPointerCapture(event.pointerId);
@@ -1713,8 +2343,20 @@ jogPollTimer = setInterval(jogRefreshStatus, 150);
 
 cameraConnectButton.addEventListener("click", () => cameraConnect());
 cameraDisconnectButton.addEventListener("click", () => cameraDisconnect());
+cameraStream.addEventListener("click", (evt) => cameraSelectTarget(evt));
 cameraRefreshStatus();
 cameraPollTimer = setInterval(cameraRefreshStatus, 500);
+
+focusScanButton.addEventListener("click", () => focusScan(false));
+focusScanWideButton.addEventListener("click", () => focusScan(true));
+focusScanNarrowButton.addEventListener("click", () => focusScan(false, true));
+focusCustomButton.addEventListener("click", () => focusRunCustomScan());
+focusActiveToggle.addEventListener("change", () => focusSetActive(focusActiveToggle.checked));
+focusLatencyButton.addEventListener("click", () => focusRunLatencyCheck());
+focusSurveyButton.addEventListener("click", () => focusStartSurvey());
+focusSurveyStopButton.addEventListener("click", () => focusStopSurvey());
+focusRefreshStatus();
+focusPollTimer = setInterval(focusRefreshStatus, 400);
 
 window.addEventListener("resize", resizeCanvas);
 initStage3d();

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DWG to ESP300 Path Planner</title>
-    <link rel="stylesheet" href="styles.css?v=camera-pinned-20260819" />
+    <link rel="stylesheet" href="styles.css?v=jog-hci-live-chart-20260827" />
   </head>
   <body>
     <header class="global-nav">
@@ -98,10 +98,67 @@
           </div>
           <div class="camera-status" id="cameraStatusText">Disconnected</div>
           <div class="camera-view">
-            <img id="cameraStream" alt="Camera feed" />
+            <img id="cameraStream" alt="Camera feed" style="cursor: crosshair" title="Click the correct blob to lock the target" />
             <div class="camera-placeholder" id="cameraPlaceholder">No feed</div>
           </div>
           <div class="camera-brightness" id="cameraBrightnessText">Brightness: -</div>
+          <div class="camera-brightness" id="cameraSpotText">Spot: -</div>
+        </section>
+
+        <section class="focus-panel">
+          <div class="panel-title">Autofocus (Z)</div>
+          <div class="focus-actions">
+            <button id="focusScanButton" class="primary-action" type="button">Scan focus</button>
+            <button id="focusScanWideButton" class="secondary-action" type="button">Wide rescan</button>
+            <button id="focusScanNarrowButton" class="secondary-action" type="button">Narrow only</button>
+          </div>
+          <label class="check focus-active-toggle"><input id="focusActiveToggle" type="checkbox" /><span>Active (auto-refocus on X/Y move)</span></label>
+          <div class="camera-status" id="focusStatusText">Idle</div>
+          <div class="camera-brightness" id="focusResultText">No scan yet.</div>
+
+          <div class="focus-chart-wrap">
+            <svg class="focus-chart" id="focusChart" viewBox="0 0 480 200" preserveAspectRatio="none"></svg>
+            <div class="focus-chart-hint" id="focusChartHint">Drag on the graph to select a range around a peak.</div>
+          </div>
+          <div class="camera-brightness" id="focusSelectionText">No range selected.</div>
+
+          <details class="focus-details">
+            <summary>Custom scan</summary>
+            <div class="focus-custom">
+              <label>Direction
+                <select id="focusCustomDirection">
+                  <option value="both">Both (+-)</option>
+                  <option value="down">Down only</option>
+                  <option value="up">Up only</option>
+                </select>
+              </label>
+              <label>Range (mm) <input id="focusCustomRange" type="number" step="0.001" min="0.001" value="0.1" /></label>
+              <label>Step (mm) <input id="focusCustomStep" type="number" step="0.001" min="0.001" value="0.005" /></label>
+              <label>Settle (s) <input id="focusCustomSettle" type="number" step="0.01" min="0" value="0.05" /></label>
+              <button id="focusCustomButton" class="primary-action" type="button">Run custom scan</button>
+            </div>
+          </details>
+
+          <details class="focus-details">
+            <summary>Timing check</summary>
+            <button id="focusLatencyButton" class="secondary-action" type="button">Verify timing (slow vs fast)</button>
+            <div class="camera-brightness" id="focusLatencyText">No timing check yet.</div>
+          </details>
+
+          <details class="focus-details">
+            <summary>Spiral survey</summary>
+            <label class="check focus-active-toggle"><input id="focusSurveyNarrowToggle" type="checkbox" /><span>Narrow only (skip wide, even on point 1)</span></label>
+            <div class="focus-actions">
+              <button id="focusSurveyButton" class="primary-action" type="button">Survey spiral path</button>
+              <button id="focusSurveyStopButton" class="secondary-action" type="button">Stop survey</button>
+            </div>
+            <div class="camera-status" id="focusSurveyStatusText">No survey yet.</div>
+            <div class="focus-chart-wrap">
+              <svg class="focus-chart" id="focusSurveyMap" viewBox="0 0 480 260" preserveAspectRatio="none"></svg>
+              <div class="focus-chart-hint" id="focusSurveyMapHint">X/Y map fills in live as the survey runs.</div>
+            </div>
+            <div class="camera-brightness" id="focusSurveyMapTip">Hover a point for detail.</div>
+          </details>
         </section>
 
         <div class="panel-tabs" role="tablist">
@@ -152,6 +209,7 @@
                 <button id="jogYMinus" class="jog-key" type="button" data-axis="y" data-dir="-1">Y-</button>
                 <span></span>
               </div>
+              <div class="jog-blocked-text" id="jogBlockedText"></div>
               <div class="jog-z">
                 <button id="jogZPlus" class="jog-key" type="button" data-axis="z" data-dir="1">Z focus +</button>
                 <button id="jogZMinus" class="jog-key" type="button" data-axis="z" data-dir="-1">Z focus -</button>
@@ -172,6 +230,7 @@
                 </div>
               </div>
               <div class="jog-position" id="jogPositionText">X 12.500 / Y 12.500 / Z 0.000</div>
+              <div class="jog-position jog-limit-text" id="jogLimitText"></div>
               <div class="jog-hint">Hold a button to jog continuously. Arrow keys move X/Y, Page Up/Down move Z, Space is E-STOP.</div>
 
               <div class="jog-run">
@@ -192,6 +251,7 @@
                 <button class="shape-tab active" type="button" data-shape="line">Line</button>
                 <button class="shape-tab" type="button" data-shape="rect">Rect</button>
                 <button class="shape-tab" type="button" data-shape="circle">Circle</button>
+                <button class="shape-tab" type="button" data-shape="spiral">Spiral</button>
               </div>
 
               <div class="shape-fields" data-fields="line">
@@ -211,7 +271,14 @@
               <div class="shape-fields hidden" data-fields="circle">
                 <label>CX <input id="circleX" type="number" step="0.001" value="5" /></label>
                 <label>CY <input id="circleY" type="number" step="0.001" value="5" /></label>
-                <span class="fixed-setting">Diameter 2 mm</span>
+                <label>Diameter <input id="circleDiameter" type="number" step="0.001" min="0.001" value="2" /></label>
+              </div>
+
+              <div class="shape-fields hidden" data-fields="spiral">
+                <label>CX <input id="spiralX" type="number" step="0.001" value="12.5" /></label>
+                <label>CY <input id="spiralY" type="number" step="0.001" value="12.5" /></label>
+                <label>Max radius <input id="spiralRadius" type="number" step="0.001" min="0.001" value="11.5" /></label>
+                <label>Turns <input id="spiralTurns" type="number" step="0.5" min="0.5" value="8" /></label>
               </div>
 
               <div class="shape-actions">
@@ -236,6 +303,6 @@
       </aside>
     </main>
 
-    <script type="module" src="app.js?v=camera-pinned-20260819"></script>
+    <script type="module" src="app.js?v=jog-hci-live-chart-20260827"></script>
   </body>
 </html>
