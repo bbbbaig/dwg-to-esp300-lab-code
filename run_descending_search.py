@@ -13,7 +13,7 @@ import json
 import time
 import urllib.request
 
-BASE_URL = "http://127.0.0.1:8766"
+BASE_URL = "http://127.0.0.1:8768"
 STEP_MM = 0.1
 DWELL_S = 0.5
 SPEED_MM_S = 0.3

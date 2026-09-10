@@ -1,5 +1,5 @@
 """One-off live Z-focus scan, driven entirely through the running
-visualizer server's HTTP API (localhost:8766).
+visualizer server's HTTP API (localhost:8768).
 
 Why HTTP and not a direct serial connection: the ESP300's COM port is a
 single exclusive connection, and the visualizer server's Jog panel already
@@ -9,10 +9,17 @@ would fail to open (or worse, contend with it). Driving through
 position/offset bookkeeping (focus trim, local home) consistent instead of
 being silently invalidated by an out-of-band raw move.
 
-Laser is CW (continuously emitting) for this setup, so there is no pulse to
-trigger per step -- brightness is read straight from
-GET /api/camera/status, which reflects the visualizer's already-open UVC
-camera connection.
+This drives the server's own /api/focus/scan/custom endpoint rather than
+re-walking Z and re-reading brightness itself (an earlier version of this
+script did that, via /api/camera/status's whole-ROI mean/max). That path
+skipped everything the server-side FocusScanner already does to keep the
+curve clean: the tracked red-glow+saturated-core blob score instead of
+whole-frame mean, a wait for a frame *timestamped after* the move settles
+instead of a blind sleep, and a median-of-N-fresh-frames read instead of a
+single frame -- see FocusScanner._read_brightness in visualizer_server.py.
+Re-implementing a second, worse version of that per script is exactly the
+kind of drift that made the graph jagged in the first place; call the one
+that's already right.
 
 Two-stage search:
   1. Coarse: +-2.5 mm around the current position, 0.1 mm step -- locates
@@ -20,23 +27,17 @@ Two-stage search:
   2. Fine: +-0.05 mm around the coarse peak, 0.002 mm step -- micrometer
      refinement via scan_focus_z's parabolic fit.
 
-All motion is RELATIVE (matches how the server's Z jog works: it trims a
-local offset rather than addressing an absolute machine Z), so this script
-tracks its own cumulative offset from the starting position and issues
-delta moves; it never assumes or resets the server's absolute frame.
-
 Set RUN_COARSE = False to skip straight to the fine stage once a surface's
-rough focus is already known from a previous scan.
+rough focus is already known from a previous scan (fine then scans around
+wherever the stage already sits).
 """
 
 import json
 import time
+import urllib.error
 import urllib.request
 
-import focus_autocal
-
-BASE_URL = "http://127.0.0.1:8766"
-Z_SPEED_MM_S = 0.3
+BASE_URL = "http://127.0.0.1:8768"
 
 RUN_COARSE = True
 # Neighborhood already known from the previous max-metric scan (real signal
@@ -48,6 +49,7 @@ COARSE_STEP_MM = 0.03
 FINE_RANGE_MM = 0.05
 FINE_STEP_MM = 0.002
 SETTLE_S = 0.15
+POLL_INTERVAL_S = 0.2
 
 
 def post_json(path: str, payload: dict) -> dict:
@@ -55,8 +57,11 @@ def post_json(path: str, payload: dict) -> dict:
     req = urllib.request.Request(
         f"{BASE_URL}{path}", data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(json.loads(exc.read().decode("utf-8")).get("error", str(exc))) from exc
 
 
 def get_json(path: str) -> dict:
@@ -64,47 +69,26 @@ def get_json(path: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-class RelativeZDriver:
-    """Wraps /api/jog/move so scan_focus_z's move_z(absolute_z) contract
-    works over a connection that only exposes relative deltas. Tracks the
-    running offset from the scan's own starting point -- 'absolute_z' here
-    is scan-local (0 == wherever the scan began), not machine Z."""
-
-    def __init__(self) -> None:
-        self.current_offset = 0.0
-
-    def move_to(self, target_offset: float) -> None:
-        delta = target_offset - self.current_offset
-        if abs(delta) <= 1e-9:
-            return
-        move_time = abs(delta) / Z_SPEED_MM_S
-        post_json("/api/jog/move", {"axis": "z", "deltaMm": delta, "speedMmS": Z_SPEED_MM_S})
-        time.sleep(move_time + SETTLE_S)
-        self.current_offset = target_offset
+def run_scan(range_mm: float, step_mm: float, settle_s: float, center_offset_mm: float = 0.0) -> dict:
+    """Kick off a custom focus scan and block until it finishes, returning
+    FocusScanner.last_result (see visualizer_server.py's _finish_scan)."""
+    post_json(
+        "/api/focus/scan/custom",
+        {"rangeMm": range_mm, "stepMm": step_mm, "direction": "both", "settleS": settle_s, "centerOffsetMm": center_offset_mm},
+    )
+    while True:
+        status = get_json("/api/focus/status")
+        if not status["scanning"]:
+            if status.get("error"):
+                raise RuntimeError(status["error"])
+            return status["lastResult"]
+        time.sleep(POLL_INTERVAL_S)
 
 
-def fire_pulse() -> None:
-    return  # laser already emitting continuously; nothing to trigger
-
-
-def read_brightness() -> float:
-    data = get_json("/api/camera/status")
-    brightness = data.get("brightness") or {}
-    # "max" saturates at 255 across a wide plateau near true focus once the
-    # ROI is tight enough to actually see the spark (verified against this
-    # rig already) -- "mean" keeps discriminating within that plateau since
-    # the glow's spatial extent/intensity still varies even after its
-    # brightest pixel clips.
-    mean_val = brightness.get("mean")
-    if mean_val is None:
-        raise RuntimeError("No brightness reading -- is the camera connected in the visualizer UI?")
-    return float(mean_val)
-
-
-def print_samples(result: focus_autocal.FocusScanResult) -> None:
-    for offset, b in result.samples:
-        marker = " <-- peak" if abs(offset - result.best_z) < 1e-9 else ""
-        print(f"    offset={offset:+.6f} mm  brightness={b:.1f}{marker}")
+def print_samples(samples: list[list[float]], best_offset: float) -> None:
+    for offset, score in samples:
+        marker = " <-- peak" if abs(offset - best_offset) < 1e-9 else ""
+        print(f"    offset={offset:+.6f} mm  score={score:.1f}{marker}")
 
 
 def main() -> None:
@@ -118,40 +102,22 @@ def main() -> None:
         raise RuntimeError("Camera is not connected in the visualizer UI. Connect it first.")
 
     print(f"Starting Z (server-reported): {jog_status['position']['z']:.6f} mm")
-    driver = RelativeZDriver()
 
-    center_offset = 0.0
     if RUN_COARSE:
         print(f"Stage 1: coarse scan, +-{COARSE_RANGE_MM} mm, step {COARSE_STEP_MM} mm")
-        coarse = focus_autocal.scan_focus_z(
-            move_z=driver.move_to,
-            fire_pulse=fire_pulse,
-            read_brightness=read_brightness,
-            center_z=0.0,
-            range_mm=COARSE_RANGE_MM,
-            step_mm=COARSE_STEP_MM,
-            settle_s=0.0,  # settle already handled inside RelativeZDriver.move_to
-        )
-        print(f"  coarse peak offset: {coarse.best_z:+.6f} mm")
-        print_samples(coarse)
-        center_offset = coarse.best_z
+        coarse = run_scan(COARSE_RANGE_MM, COARSE_STEP_MM, SETTLE_S)
+        print(f"  coarse peak offset: {coarse['bestOffsetMm']:+.6f} mm")
+        print_samples(coarse["samples"]["narrow"], coarse["bestOffsetMm"])
 
+    # run_custom always leaves the stage at that scan's own detected peak
+    # (see FocusScanner._run_stage), so the fine pass below is already
+    # centered on the coarse peak -- no extra centering move needed here.
     print(f"Stage 2: fine scan, +-{FINE_RANGE_MM} mm, step {FINE_STEP_MM} mm")
-    fine = focus_autocal.scan_focus_z(
-        move_z=driver.move_to,
-        fire_pulse=fire_pulse,
-        read_brightness=read_brightness,
-        center_z=center_offset,
-        range_mm=FINE_RANGE_MM,
-        step_mm=FINE_STEP_MM,
-        settle_s=0.0,
-    )
-    print(f"  fine focus offset: {fine.best_z:+.6f} mm (parabolic fit used={fine.fit_used})")
-    print_samples(fine)
+    fine = run_scan(FINE_RANGE_MM, FINE_STEP_MM, SETTLE_S)
+    print(f"  fine focus offset (from fine scan's own start): {fine['bestOffsetMm']:+.6f} mm (parabolic fit used={fine['fitUsed']})")
+    print_samples(fine["samples"]["narrow"], fine["bestOffsetMm"])
 
-    driver.move_to(fine.best_z)
     final_status = get_json("/api/jog/status")
-    print(f"Moved to detected focus offset {fine.best_z:+.6f} mm from scan start.")
     print(f"Final Z (server-reported): {final_status['position']['z']:.6f} mm")
 
 

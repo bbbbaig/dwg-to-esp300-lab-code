@@ -41,6 +41,15 @@ const shapeTabs = document.querySelectorAll(".shape-tab");
 const shapeFields = document.querySelectorAll(".shape-fields");
 const panelTabs = document.querySelectorAll(".panel-tab");
 const tabPanes = document.querySelectorAll(".tab-pane");
+// Jog tab active -> relocate the live .camera-view into the drawing preview
+// (large, watchable while jogging); any other tab -> put it back. Same DOM
+// node both places (not a second <img>), so the one open MJPEG connection
+// and the click-to-target handler (bound to #cameraStream, coordinates read
+// from getBoundingClientRect at click time) keep working unchanged either way.
+const cameraViewBox = document.querySelector(".camera-view");
+const cameraViewHomeParent = cameraViewBox.parentNode;
+const cameraViewHomeNext = cameraViewBox.nextElementSibling;
+const canvasWrap = document.querySelector(".canvas-wrap");
 const cameraIndex = document.getElementById("cameraIndex");
 const cameraConnectButton = document.getElementById("cameraConnectButton");
 const cameraDisconnectButton = document.getElementById("cameraDisconnectButton");
@@ -345,6 +354,17 @@ async function deleteSelectedPaths() {
 function setPanelTab(tab) {
   for (const button of panelTabs) button.classList.toggle("active", button.dataset.tab === tab);
   for (const pane of tabPanes) pane.classList.toggle("hidden", pane.dataset.tabPane !== tab);
+  updateCameraBigView(tab);
+}
+
+function updateCameraBigView(tab) {
+  if (tab === "jog") {
+    canvasWrap.appendChild(cameraViewBox);
+    cameraViewBox.classList.add("camera-view--big");
+  } else {
+    cameraViewBox.classList.remove("camera-view--big");
+    cameraViewHomeParent.insertBefore(cameraViewBox, cameraViewHomeNext);
+  }
 }
 
 function setShapeMode(mode) {
@@ -2208,6 +2228,9 @@ for (const tab of shapeTabs) {
 for (const tab of panelTabs) {
   tab.addEventListener("click", () => setPanelTab(tab.dataset.tab));
 }
+// Match whichever tab the static HTML already marks active (Jog, by
+// default) -- setPanelTab itself only runs on a later click.
+updateCameraBigView(document.querySelector(".panel-tab.active")?.dataset.tab);
 newManualButton.addEventListener("click", () => createManualSession([], "Blank manual job ready.").catch((error) => setStatus(error.message)));
 addShapeButton.addEventListener("click", () => addShape().catch((error) => setStatus(error.message)));
 deleteSelectedButton.addEventListener("click", () => deleteSelectedPaths().catch((error) => setStatus(error.message)));

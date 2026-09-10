@@ -608,6 +608,20 @@ canvas {
   pointer-events: none;
 }
 
+/* Jog tab active: the live .camera-view (same element, not a copy -- see
+   app.js updateCameraBigView) is moved into .canvas-wrap so it's large and
+   watchable while jogging, instead of the small sidebar box. Absolute +
+   inset:0 over .canvas-wrap's position:relative covers the 2D preview
+   canvas without needing to touch/hide the canvas itself. Reverted (class
+   removed, node moved back) the moment a different tab is picked. */
+.camera-view--big {
+  position: absolute;
+  inset: 0;
+  aspect-ratio: unset;
+  border-radius: 0;
+  z-index: 5;
+}
+
 .camera-brightness {
   font-size: 12px;
   color: var(--muted-strong);

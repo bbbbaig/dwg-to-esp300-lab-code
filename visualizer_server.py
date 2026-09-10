@@ -9,6 +9,7 @@ import math
 import mimetypes
 import re
 import shutil
+import statistics
 import threading
 import time
 import uuid
@@ -127,7 +128,15 @@ FOCUS_FRAME_WAIT_TIMEOUT_S = 1.0
 # final scan graph having spiky/jumpy points. Averaging a few consecutive
 # frames per Z step smooths that out without adding a real settle delay
 # (frames just keep arriving at the camera's own ~15fps while we read them).
-FOCUS_BRIGHTNESS_SAMPLES = 2
+#
+# 2-sample MEAN (the original fix) was not enough: live scan logs show the
+# core-pairing dropping out to a hard score=0.0 on plenty of individual
+# frames (not just a small wobble), and mean-of-2 lets a single 0.0 drag a
+# real reading down by half or wipe it out entirely if both samples happen
+# to land on a dropout. MEDIAN of an odd count of samples instead ignores
+# up to (N-1)/2 dropped-out frames per step as long as the majority still
+# see the spot -- verified against this rig's own captured scan data.
+FOCUS_BRIGHTNESS_SAMPLES = 5
 FOCUS_XY_DEBOUNCE_S = 0.6
 
 # Trend prediction: fit a plane (z = a*x + b*y + c) through recent scan
@@ -143,6 +152,52 @@ FOCUS_PLANE_MIN_SAMPLES = 3
 FOCUS_PLANE_MAX_SAMPLES = 10
 FOCUS_PREDICT_MAX_DELTA_MM = 0.1  # cap so a bad/ill-conditioned fit can't fling Z far on one move
 FOCUS_LOG_PATH = ROOT / "focus_scan_log.csv"
+# Separate files, not more columns on FOCUS_LOG_PATH: that CSV's header is
+# only ever written once (on first creation) and every row since has relied
+# on that fixed 9-column shape -- appending wider rows to it would misalign
+# every existing reader (read_focus_log's DictReader included) against the
+# old header. New data gets its own file instead.
+FOCUS_QUALITY_LOG_PATH = ROOT / "focus_scan_quality_log.csv"
+CAMERA_FREEZE_LOG_PATH = ROOT / "camera_freeze_log.csv"
+SERIAL_RETRY_LOG_PATH = ROOT / "serial_retry_log.csv"
+FOCUS_PHOTO_DIR = ROOT / "focus_photos"
+FOCUS_PHOTO_LOG_PATH = ROOT / "focus_photo_log.csv"
+FOCUS_PHOTO_WAIT_TIMEOUT_S = 2.0
+
+
+def _append_csv_row(path: Path, header: list[str], row: list) -> None:
+    """Shared best-effort CSV append: write `header` only if the file is
+    new, then append `row`. Logging is diagnostic, never load-bearing --
+    a disk hiccup here must not break whatever real operation triggered it."""
+    try:
+        is_new = not path.exists()
+        with path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            if is_new:
+                writer.writerow(header)
+            writer.writerow(row)
+    except OSError:
+        pass
+
+
+def _scan_quality_metrics(samples: list[tuple[float, float]]) -> dict:
+    """Zero-dropout rate and curve roughness for one scan's (z, score)
+    samples -- the same two numbers that took a one-off analysis script to
+    compute during the 2026-09-09 focus-jaggedness investigation. Computed
+    for every scan going forward instead of by hand after the fact."""
+    values = [v for _, v in samples]
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "zeroCount": 0, "zeroPct": 0.0, "roughness": 0.0}
+    zero_count = sum(1 for v in values if v == 0.0)
+    peak = max(values) or 1.0
+    total_variation = sum(abs(values[i + 1] - values[i]) for i in range(n - 1))
+    return {
+        "n": n,
+        "zeroCount": zero_count,
+        "zeroPct": round(100.0 * zero_count / n, 2),
+        "roughness": round(total_variation / peak, 3),
+    }
 
 
 class JogController:
@@ -215,17 +270,55 @@ class JogController:
         return response.decode("ascii", errors="ignore").strip()
 
     def _read_axis_position(self, axis: int) -> float:
+        # A real serial.SerialException used to propagate straight out of
+        # here on the very first occurrence, and every caller treated that
+        # as "the port died" -- torn down the whole connection (see
+        # SerialCommError handling in _poll_loop / _run_worker). But a lone
+        # transient I/O hiccup on a still-good, still-open handle (one
+        # dropped/garbled USB-serial read among the thousands a long "run on
+        # machine" job generates) looks identical to a truly severed port at
+        # that first exception. Folding SerialCommError into the SAME retry
+        # budget as a bad/garbled reply -- instead of only retrying parse
+        # mismatches -- means one bad round-trip no longer nukes an
+        # otherwise-healthy connection mid-run; only a run of JOG_TP_RETRIES
+        # consecutive real failures (parse or I/O) still gives up and
+        # surfaces the error, which is what an actually-dead port looks like.
         last = ""
+        last_comm_error: SerialCommError | None = None
+        comm_error_attempts = 0
         for attempt in range(JOG_TP_RETRIES):
-            last = self._query(f"{axis}TP")
-            match = JOG_POSITION_PATTERN.search(last)
-            # Discard out-of-range values (parsing/framing artifacts) rather
-            # than accepting them; the configured travel range is well
-            # under 200 mm on every axis.
-            if match and abs(float(match.group())) <= 250.0:
-                return float(match.group())
+            try:
+                last = self._query(f"{axis}TP")
+                last_comm_error = None
+            except SerialCommError as exc:
+                last_comm_error = exc
+                comm_error_attempts += 1
+            else:
+                match = JOG_POSITION_PATTERN.search(last)
+                # Discard out-of-range values (parsing/framing artifacts) rather
+                # than accepting them; the configured travel range is well
+                # under 200 mm on every axis.
+                if match and abs(float(match.group())) <= 250.0:
+                    if comm_error_attempts:
+                        # Recovered within the retry budget -- log it so a
+                        # pattern of frequent transient hiccups is visible in
+                        # data instead of only ever showing up as "it just
+                        # disconnected sometimes" with nothing to point at.
+                        _append_csv_row(
+                            SERIAL_RETRY_LOG_PATH,
+                            ["timestamp_utc", "axis", "comm_error_attempts", "outcome"],
+                            [datetime.now(timezone.utc).isoformat(timespec="seconds"), axis, comm_error_attempts, "recovered"],
+                        )
+                    return float(match.group())
             if attempt < JOG_TP_RETRIES - 1:
                 time.sleep(JOG_TP_RETRY_DELAY)
+        if last_comm_error is not None:
+            _append_csv_row(
+                SERIAL_RETRY_LOG_PATH,
+                ["timestamp_utc", "axis", "comm_error_attempts", "outcome"],
+                [datetime.now(timezone.utc).isoformat(timespec="seconds"), axis, comm_error_attempts, "failed"],
+            )
+            raise last_comm_error
         raise RuntimeError(f"Axis {axis} position read failed; last reply={last!r}")
 
     def _raw_of(self, name: str, local_value: float) -> float:
@@ -278,12 +371,23 @@ class JogController:
     def _poll_loop(self, generation: int) -> None:
         """Background thread: refresh self.position from TP reads so status
         queries reflect current motion without blocking on move(). Exits
-        when disconnect/estop increments the generation counter."""
+        when disconnect/estop increments the generation counter.
+
+        Skips its own querying while a plan run (_run_worker) is active:
+        that worker already TP-polls the exact axes it's moving to confirm
+        arrival, so running both at once was hitting the ESP300 with two
+        independent, uncoordinated streams of TP queries for the whole
+        length of every "run on machine" job -- roughly doubling serial
+        traffic for no benefit (self.position gets updated by _run_worker's
+        own polling either way) and doubling the exposure window for
+        whatever transient causes the occasional mid-run disconnect."""
         while True:
             for name, axis in JOG_AXES.items():
                 with self._lock:
                     if self._poll_generation != generation or not self.connected or self.dry_run or self.ser is None:
                         return
+                    if self._run_state["running"]:
+                        continue
                     try:
                         raw = self._read_axis_position(axis)
                         self.raw_position[name] = raw
@@ -757,9 +861,9 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
     the autofocus metric toward a reflection instead of the actual spot.
     So: find the largest red blob that contains a core blob's centroid,
     and derive score/x/y from ONLY that pair's mask. If no red blob has a
-    nested core (e.g. mid-scan, well off focus, nothing saturated yet),
-    score is 0 -- that's fine, the scan just needs the real peak to stand
-    out from that, not from a pile of unrelated glow.
+    nested core yet (mid-scan, off focus, nothing saturated), fall back to
+    the best red-glow blob alone (see below) instead of dropping straight
+    to 0 -- only a frame with no red glow at all scores exactly 0.
 
     Among multiple red blobs that each have a nested core (e.g. a stray
     reflection happens to saturate too), the stage only moves smoothly --
@@ -836,6 +940,28 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
         score = float(np.sum(value[target_mask > 0]))
         wx = moments["m10"] / moments["m00"] if moments["m00"] > 0 else None
         wy = moments["m01"] / moments["m00"] if moments["m00"] > 0 else None
+    elif red_entries:
+        # No red blob has a saturated core yet -- genuinely off-focus, not a
+        # dropped frame. The old behavior scored this 0.0, same as "nothing
+        # lit up at all"; across a scan that meant the metric fell off a
+        # cliff the moment the core stopped saturating, then jumped straight
+        # back up once it did, instead of the glow's own brightness rising
+        # and falling smoothly through that whole stretch. Score the best
+        # red-glow blob alone (no core requirement) here instead, so the
+        # curve tapers off through the actually-dimmer region rather than
+        # snapping to 0 -- still always less than a paired red+core score
+        # for the same glow, since that also sums the saturated core pixels
+        # on top of it, so this can't make a near-focus read look bigger
+        # than a true in-focus one.
+        target_red = (
+            min(red_entries, key=lambda r: (r["x"] - prior_xy[0]) ** 2 + (r["y"] - prior_xy[1]) ** 2)
+            if prior_xy is not None
+            else max(red_entries, key=lambda r: r["area"])
+        )
+        moments = cv2.moments(target_red["mask"], binaryImage=True)
+        score = float(np.sum(value[target_red["mask"] > 0]))
+        wx = moments["m10"] / moments["m00"] if moments["m00"] > 0 else None
+        wy = moments["m01"] / moments["m00"] if moments["m00"] > 0 else None
     else:
         score = 0.0
         wx = wy = None
@@ -878,6 +1004,18 @@ class CameraController:
         # skipping the lock here just risks one stale-anchor frame at worst, never
         # a real race.
         self._prior_target_xy: tuple[float, float] | None = None
+        # Frozen-frame watchdog: cap.read() can keep returning ok=True with a
+        # driver-cached/duplicate frame forever (a real UVC/USB quirk, not
+        # covered by the grabFrame-failure counter below since ok is True) --
+        # seen live on this rig as a "focus scan" that kept moving Z for 20+
+        # minutes while the reported score sat pinned at one exact value the
+        # whole time, because _latest_frame_time still advances on every loop
+        # tick even though the pixel content never changed. (mean, max) being
+        # bit-identical across many consecutive real frames is not something
+        # sensor noise produces by chance, so it's used here as a cheap stand-in
+        # for a full frame-content hash.
+        self._last_stats_signature: tuple[float, float] | None = None
+        self._frozen_frame_count = 0
 
     def connect(self, index: int, backend: int = cv2.CAP_MSMF) -> dict:
         with self._lock:
@@ -906,6 +1044,8 @@ class CameraController:
         self._latest_regions = None
         self._latest_frame_time = 0.0
         self._prior_target_xy = None
+        self._last_stats_signature = None
+        self._frozen_frame_count = 0
 
     def disconnect(self) -> dict:
         with self._lock:
@@ -954,6 +1094,23 @@ class CameraController:
                         region = cropped
                 gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
                 stats = {"mean": float(np.mean(gray)), "max": float(np.max(gray))}
+
+                signature = (stats["mean"], stats["max"])
+                if signature == self._last_stats_signature:
+                    self._frozen_frame_count += 1
+                else:
+                    self._last_stats_signature = signature
+                    self._frozen_frame_count = 0
+                if self._frozen_frame_count >= max_consecutive_failures:
+                    print(f"[camera] frame content unchanged for {self._frozen_frame_count} reads, disconnecting (stalled driver/USB, not a real dropped connection)")
+                    _append_csv_row(
+                        CAMERA_FREEZE_LOG_PATH,
+                        ["timestamp_utc", "frozen_frame_count", "stale_mean", "stale_max"],
+                        [datetime.now(timezone.utc).isoformat(timespec="seconds"), self._frozen_frame_count, stats["mean"], stats["max"]],
+                    )
+                    with self._lock:
+                        self._disconnect_locked()
+                    break
 
                 regions = locate_bright_regions(region, prior_xy=self._prior_target_xy)
                 if regions["x"] is not None:
@@ -1170,10 +1327,14 @@ class FocusScanner:
         isn't enough (background capture cadence + camera exposure time can
         both make "the latest frame" one grabbed before the move finished).
 
-        Averages FOCUS_BRIGHTNESS_SAMPLES consecutive frames (each waited
-        for fresh in turn, so no two reads are the same frame) instead of
-        trusting one -- single-frame score is noisy enough to make the scan
-        graph spiky."""
+        Takes the MEDIAN of FOCUS_BRIGHTNESS_SAMPLES consecutive frames
+        (each waited for fresh in turn, so no two reads are the same frame)
+        instead of trusting one or averaging: single-frame score doesn't
+        just wobble, it can hard-drop to exactly 0.0 whenever that one
+        frame fails to pair a red-glow blob with a nested saturated core
+        (see locate_bright_regions). A mean lets one dropped-out frame drag
+        or wipe the whole step's reading; the median instead needs a
+        majority of the samples to drop out before it's affected."""
         cursor = after_time
         scores: list[float] = []
         for i in range(max(1, FOCUS_BRIGHTNESS_SAMPLES)):
@@ -1187,7 +1348,7 @@ class FocusScanner:
             peak = status.get("peak")
             scores.append(float(peak.get("score") or 0.0) if peak else 0.0)
             cursor = status.get("frameTime", cursor)
-        return sum(scores) / len(scores)
+        return statistics.median(scores)
 
     def _run_stage(
         self,
@@ -1479,6 +1640,10 @@ class FocusScanner:
         settled = JOG.status()["position"]
         settled_raw_z = JOG.current_raw_z()
         peak_brightness = max(values) if values else None
+        # Quality metrics from the narrow/primary curve only (not concatenated
+        # with wide) -- wide and narrow cover different Z ranges, so joining
+        # them end to end would count the seam between the two as a fake jump.
+        quality = _scan_quality_metrics(primary_result.samples)
         with self._lock:
             self.has_baseline = True
             self._plane_samples.append((settled["x"], settled["y"], settled["z"]))
@@ -1493,6 +1658,7 @@ class FocusScanner:
                 "usedWide": wide_result is not None,
                 "refinedPoints": primary_result.refined_points + (wide_result.refined_points if wide_result else 0),
                 "label": label,
+                "quality": quality,
                 "samples": {
                     "wide": [[z, v] for z, v in wide_result.samples] if wide_result else [],
                     "narrow": [[z, v] for z, v in primary_result.samples],
@@ -1500,6 +1666,69 @@ class FocusScanner:
                 "timestamp": time.time(),
             }
         self._append_log(settled, primary_result, wide_result is not None, peak_brightness)
+        _append_csv_row(
+            FOCUS_QUALITY_LOG_PATH,
+            ["timestamp_utc", "x_mm", "y_mm", "z_mm", "label", "n_samples", "zero_dropouts", "zero_dropout_pct", "roughness_tv_over_peak"],
+            [
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                round(settled["x"], 4),
+                round(settled["y"], 4),
+                round(settled["z"], 4),
+                label or "",
+                quality["n"],
+                quality["zeroCount"],
+                quality["zeroPct"],
+                quality["roughness"],
+            ],
+        )
+        self._save_focus_photo(settled, primary_result, label, peak_brightness)
+
+    def _save_focus_photo(
+        self,
+        settled: dict,
+        primary_result: focus_autocal.FocusScanResult,
+        label: str | None,
+        peak_brightness: float | None,
+    ) -> None:
+        """Snap and save the camera's current (already blob-annotated) frame
+        right after a scan lands the stage on its detected focus -- a visual
+        record of what "in focus" looked like at that X/Y, alongside the
+        numeric log. Best-effort and never raises: a missed photo must not
+        take the scan result down with it.
+
+        Waits for a frame timestamped after this call, same reasoning as
+        _read_brightness's wait_for_fresh use -- the stage has already
+        settled at this point (_run_stage's move_to already slept through
+        the move + mech settle before returning), so this just avoids the
+        remaining sliver of a chance of grabbing a frame the capture loop
+        had cached from just before that settle."""
+        try:
+            status = CAMERA.wait_for_fresh(time.monotonic(), timeout=FOCUS_PHOTO_WAIT_TIMEOUT_S)
+            if not status.get("connected"):
+                return
+            jpeg = CAMERA.latest_jpeg()
+            if not jpeg:
+                return
+            FOCUS_PHOTO_DIR.mkdir(exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            filename = f"{stamp}_offset{primary_result.best_z:+.4f}mm.jpg"
+            (FOCUS_PHOTO_DIR / filename).write_bytes(jpeg)
+            _append_csv_row(
+                FOCUS_PHOTO_LOG_PATH,
+                ["timestamp_utc", "filename", "x_mm", "y_mm", "z_mm", "best_offset_mm", "peak_blob_score", "label"],
+                [
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    filename,
+                    round(settled["x"], 4),
+                    round(settled["y"], 4),
+                    round(settled["z"], 4),
+                    round(primary_result.best_z, 6),
+                    round(peak_brightness, 1) if peak_brightness is not None else "",
+                    label or "",
+                ],
+            )
+        except Exception:
+            pass  # photo capture is diagnostic, never load-bearing
 
     def _latency_worker(self) -> None:
         # Deliberately generous: settle a full order of magnitude longer

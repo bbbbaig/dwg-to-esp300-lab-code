@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostName = "127.0.0.1"
-$port = 8766
+$port = 8768  # NOT 8765/8766/8767 -- those are permanently reserved for unrelated personal study servers
 $url = "http://$hostName`:$port"
 
 Set-Location -LiteralPath $root

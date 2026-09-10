@@ -18,7 +18,7 @@ import time
 import urllib.request
 import urllib.error
 
-BASE_URL = "http://127.0.0.1:8766"
+BASE_URL = "http://127.0.0.1:8768"
 STEP_MM = 0.1
 MAX_TOTAL_MM = 10.0
 SPEED_MM_S = 0.3
