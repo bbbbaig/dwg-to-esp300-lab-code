@@ -831,7 +831,15 @@ class JogController:
 JOG = JogController()
 
 
-CAMERA_STREAM_FPS = 15
+CAMERA_STREAM_FPS = 20
+# ponytail: 2026-09-10, first attempt -- 15->30 crashed the whole process under real
+# scan load (no traceback). 2026-09-10, second attempt -- retrying at a smaller step (20,
+# not 30) and isolating the variable: verify idle stability alone first, THEN add scan
+# load, instead of changing both at once like last time. If 20 also wedges under scan
+# load, the ceiling is below the loop's own per-frame cost (~26fps observed max throughput
+# at fps=30, i.e. it was already CPU-bound, not sleep-bound) and the real fix is what the
+# first attempt's note said: decouple cap.read() (cheap, drains the USB buffer) from
+# JPEG-encode + blob-detect (expensive, can stay at 15) instead of raising both together.
 CAMERA_JPEG_QUALITY = 80
 CAMERA_BOUNDARY = "focusframe"
 
@@ -847,6 +855,50 @@ RED_HUE_HIGH = ((170, 90, 120), (180, 255, 255))
 CORE_MIN_GRAY = 250
 BRIGHT_SPOT_MIN_AREA_PX = 4
 MAX_TRACKED_BLOBS = 8
+# ponytail: both eyeballed, not measured against real spike frames yet --
+# re-tune using the -1.0~-0.5mm / +0.3mm spike-region rescan (2026-09-11 plan).
+MAX_PRIOR_JUMP_PX = 40  # nearest prior-frame match farther than this is untrusted
+MIN_CANDIDATE_AREA_PX = 16  # red blobs smaller than this are noise, not a candidate target
+
+
+def _nearest_within_gate(items, prior_xy, max_jump_px, xy_of):
+    """Pick the item whose (x, y) is nearest prior_xy, but only if that
+    nearest pick is within max_jump_px -- a real target moves smoothly frame
+    to frame, so the nearest candidate landing farther than this is more
+    likely a stray reflection than the same target's next position. Returns
+    None when nothing is within the gate (caller falls back to area-based
+    selection instead of locking onto a spurious jump).
+    """
+    px, py = prior_xy
+    best = min(items, key=lambda it: (xy_of(it)[0] - px) ** 2 + (xy_of(it)[1] - py) ** 2)
+    bx, by = xy_of(best)
+    if (bx - px) ** 2 + (by - py) ** 2 > max_jump_px ** 2:
+        return None
+    return best
+
+
+def _predict_xy(prior_xy: tuple[float, float] | None, velocity_xy: tuple[float, float]) -> tuple[float, float] | None:
+    """Where the tracked spot should be *this* frame, given where it was
+    last frame and how fast it's been moving -- a straight-line stage move
+    keeps a roughly constant on-screen velocity, so prior + velocity is a
+    tighter gate anchor than a static prior alone (which always lags one
+    frame behind on anything actually moving)."""
+    if prior_xy is None:
+        return None
+    return (prior_xy[0] + velocity_xy[0], prior_xy[1] + velocity_xy[1])
+
+
+def _update_velocity_xy(
+    prior_xy: tuple[float, float] | None, velocity_xy: tuple[float, float], new_xy: tuple[float, float]
+) -> tuple[float, float]:
+    """Smoothed frame-to-frame velocity update, called after a real
+    detection lands. Folds in the latest (possibly noisy) displacement at
+    half weight rather than replacing the estimate outright, so one jittery
+    frame can't itself swing next frame's prediction wildly."""
+    if prior_xy is None:
+        return (0.0, 0.0)
+    raw = (new_xy[0] - prior_xy[0], new_xy[1] - prior_xy[1])
+    return (0.5 * velocity_xy[0] + 0.5 * raw[0], 0.5 * velocity_xy[1] + 0.5 * raw[1])
 
 
 def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | None = None) -> dict:
@@ -918,8 +970,14 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
     if not all_entries:
         return {"blobs": [], "score": 0.0, "x": None, "y": None, "n_blobs": 0}
 
+    # Noise-area gate: a red blob this small is more likely sensor speckle than
+    # a real glow, so it's excluded before it can ever become the chosen
+    # target (it still shows up in the overlay via all_entries/blobs below).
+    # Falls back to the unfiltered list if gating would leave nothing at all.
+    sizeable_red = [r for r in red_entries if r["area"] >= MIN_CANDIDATE_AREA_PX] or red_entries
+
     candidates = []  # (red_entry, core_entry) pairs where the core sits inside the red blob
-    for r in red_entries:
+    for r in sizeable_red:
         for co in core_entries:
             if cv2.pointPolygonTest(r["contour"], (co["x"], co["y"]), False) >= 0:
                 candidates.append((r, co))
@@ -929,8 +987,8 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
     target_core = None
     if candidates:
         if prior_xy is not None:
-            px, py = prior_xy
-            target_red, target_core = min(candidates, key=lambda rc: (rc[0]["x"] - px) ** 2 + (rc[0]["y"] - py) ** 2)
+            nearest = _nearest_within_gate(candidates, prior_xy, MAX_PRIOR_JUMP_PX, lambda rc: (rc[0]["x"], rc[0]["y"]))
+            target_red, target_core = nearest if nearest is not None else max(candidates, key=lambda rc: rc[0]["area"])
         else:
             target_red, target_core = max(candidates, key=lambda rc: rc[0]["area"])
 
@@ -940,7 +998,7 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
         score = float(np.sum(value[target_mask > 0]))
         wx = moments["m10"] / moments["m00"] if moments["m00"] > 0 else None
         wy = moments["m01"] / moments["m00"] if moments["m00"] > 0 else None
-    elif red_entries:
+    elif sizeable_red:
         # No red blob has a saturated core yet -- genuinely off-focus, not a
         # dropped frame. The old behavior scored this 0.0, same as "nothing
         # lit up at all"; across a scan that meant the metric fell off a
@@ -953,11 +1011,8 @@ def locate_bright_regions(frame: np.ndarray, prior_xy: tuple[float, float] | Non
         # for the same glow, since that also sums the saturated core pixels
         # on top of it, so this can't make a near-focus read look bigger
         # than a true in-focus one.
-        target_red = (
-            min(red_entries, key=lambda r: (r["x"] - prior_xy[0]) ** 2 + (r["y"] - prior_xy[1]) ** 2)
-            if prior_xy is not None
-            else max(red_entries, key=lambda r: r["area"])
-        )
+        nearest = _nearest_within_gate(sizeable_red, prior_xy, MAX_PRIOR_JUMP_PX, lambda r: (r["x"], r["y"])) if prior_xy is not None else None
+        target_red = nearest if nearest is not None else max(sizeable_red, key=lambda r: r["area"])
         moments = cv2.moments(target_red["mask"], binaryImage=True)
         score = float(np.sum(value[target_red["mask"] > 0]))
         wx = moments["m10"] / moments["m00"] if moments["m00"] > 0 else None
@@ -1004,6 +1059,14 @@ class CameraController:
         # skipping the lock here just risks one stale-anchor frame at worst, never
         # a real race.
         self._prior_target_xy: tuple[float, float] | None = None
+        # Frame-to-frame velocity of _prior_target_xy (pixels/frame), smoothed.
+        # The stage moves in a straight line at roughly constant speed, so the
+        # real spot's next position is prior + velocity, not just prior (a
+        # static anchor) -- extrapolating tightens the prior_xy gate against
+        # a stray reflection that happens to be merely close to last frame's
+        # spot instead of on the same line of motion. Reset alongside
+        # _prior_target_xy any time that anchor is invalidated/reset.
+        self._prior_velocity_xy: tuple[float, float] = (0.0, 0.0)
         # Frozen-frame watchdog: cap.read() can keep returning ok=True with a
         # driver-cached/duplicate frame forever (a real UVC/USB quirk, not
         # covered by the grabFrame-failure counter below since ok is True) --
@@ -1044,6 +1107,7 @@ class CameraController:
         self._latest_regions = None
         self._latest_frame_time = 0.0
         self._prior_target_xy = None
+        self._prior_velocity_xy = (0.0, 0.0)
         self._last_stats_signature = None
         self._frozen_frame_count = 0
 
@@ -1056,6 +1120,7 @@ class CameraController:
         with self._lock:
             self.roi = roi
             self._prior_target_xy = None  # old anchor was in the previous ROI's local frame
+            self._prior_velocity_xy = (0.0, 0.0)
             return self._status_locked()
 
     def select_target(self, x: float, y: float) -> dict:
@@ -1069,6 +1134,7 @@ class CameraController:
             roi = self.roi
             offset_x, offset_y = (roi[0], roi[1]) if roi is not None else (0, 0)
             self._prior_target_xy = (x - offset_x, y - offset_y)
+            self._prior_velocity_xy = (0.0, 0.0)  # fresh manual pick, no motion history yet
             return self._status_locked()
 
     def _capture_loop(self) -> None:
@@ -1112,8 +1178,12 @@ class CameraController:
                         self._disconnect_locked()
                     break
 
-                regions = locate_bright_regions(region, prior_xy=self._prior_target_xy)
+                predicted_xy = _predict_xy(self._prior_target_xy, self._prior_velocity_xy)
+                regions = locate_bright_regions(region, prior_xy=predicted_xy)
                 if regions["x"] is not None:
+                    self._prior_velocity_xy = _update_velocity_xy(
+                        self._prior_target_xy, self._prior_velocity_xy, (regions["x"], regions["y"])
+                    )
                     self._prior_target_xy = (regions["x"], regions["y"])
                 offset_x, offset_y = (roi[0], roi[1]) if roi is not None else (0, 0)
                 for b in regions["blobs"]:

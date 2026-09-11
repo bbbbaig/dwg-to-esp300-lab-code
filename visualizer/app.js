@@ -100,6 +100,7 @@ const jogGotoZ = document.getElementById("jogGotoZ");
 const jogGotoButton = document.getElementById("jogGotoButton");
 const jogRunButton = document.getElementById("jogRunButton");
 const jogRunStopButton = document.getElementById("jogRunStopButton");
+const jogRunResumeButton = document.getElementById("jogRunResumeButton");
 const jogRunStatusText = document.getElementById("jogRunStatusText");
 const jogPositionText = document.getElementById("jogPositionText");
 const jogLimitText = document.getElementById("jogLimitText");
@@ -1214,13 +1215,25 @@ async function jogGoto() {
 
 let jogRunPollTimer = null;
 let jogRunActive = false;
+// Which slice of motion.segments the *current* /api/run/start call was
+// given -- 0 for a fresh full run, >0 when resuming a previous failure/stop.
+// Needed because the server's own data.index/data.total are relative to
+// whatever segment list it was just handed, not the full plan.
+let jogRunActiveOffset = 0;
+// Where a resume would pick up from, remembered after a run stops without
+// finishing (error or manual stop) -- cleared once nothing is left to
+// resume (run completed, or a fresh full run was started).
+let jogRunResumeSegments = null;
+let jogRunResumeOffset = 0;
 
 function jogRunApplyState(data) {
   jogRunActive = Boolean(data.running);
+  const effectiveIndex = jogRunActiveOffset + data.index;
+  const effectiveTotal = (motion && motion.segments && motion.segments.length) || data.total;
   if (data.running) {
-    jogRunStatusText.textContent = `Running segment ${data.index}/${data.total}`;
+    jogRunStatusText.textContent = `Running segment ${effectiveIndex}/${effectiveTotal}`;
   } else if (data.error) {
-    jogRunStatusText.textContent = `Stopped: ${data.error}`;
+    jogRunStatusText.textContent = `Stopped: ${data.error} (segment ${effectiveIndex}/${effectiveTotal})`;
   } else if (data.done) {
     jogRunStatusText.textContent = "Run complete.";
   } else {
@@ -1228,9 +1241,9 @@ function jogRunApplyState(data) {
   }
   // Advance the playback playhead using segments confirmed complete on the
   // physical stage, rather than elapsed time.
-  if (motion && motion.segments && data.index > 0) {
+  if (motion && motion.segments && effectiveIndex > 0) {
     let elapsed = 0;
-    for (let i = 0; i < Math.min(data.index, motion.segments.length); i += 1) {
+    for (let i = 0; i < Math.min(effectiveIndex, motion.segments.length); i += 1) {
       elapsed += motion.segments[i].duration;
     }
     playhead = Math.min(elapsed, motion.stats.duration || elapsed);
@@ -1243,10 +1256,21 @@ function jogRunApplyState(data) {
       clearInterval(jogRunPollTimer);
       jogRunPollTimer = null;
     }
+    // Remember where to resume from if this run stopped (error or manual
+    // stop) before finishing the full plan; otherwise there's nothing left.
+    if (!data.done && motion && motion.segments && effectiveIndex < motion.segments.length) {
+      jogRunResumeSegments = motion.segments.slice(effectiveIndex);
+      jogRunResumeOffset = effectiveIndex;
+      jogRunResumeButton.disabled = false;
+    } else {
+      jogRunResumeSegments = null;
+      jogRunResumeOffset = 0;
+      jogRunResumeButton.disabled = true;
+    }
   }
 }
 
-async function jogRunPlan() {
+async function jogRunPlan(segmentsOverride, offsetOverride) {
   if (!jogConnected) {
     setStatus("Connect jog control first.");
     return;
@@ -1259,15 +1283,27 @@ async function jogRunPlan() {
     setStatus("A run is already in progress.");
     return;
   }
-  const count = motion.segments.length;
-  const seconds = (motion.stats.duration || 0).toFixed(1);
-  if (!window.confirm(`Run the full planned path on the machine?\n${count} segments, ~${seconds}s.`)) return;
+  const offset = offsetOverride || 0;
+  const segments = segmentsOverride || motion.segments;
+  const count = segments.length;
+  const prompt =
+    offset > 0
+      ? `Resume the planned path from segment ${offset + 1}/${motion.segments.length}?\n${count} segments left.`
+      : `Run the full planned path on the machine?\n${count} segments, ~${(motion.stats.duration || 0).toFixed(1)}s.`;
+  if (!window.confirm(prompt)) return;
   stopJogHold();
+  if (offset === 0) {
+    // A fresh full run supersedes any earlier partial-failure memory.
+    jogRunResumeSegments = null;
+    jogRunResumeOffset = 0;
+    jogRunResumeButton.disabled = true;
+  }
+  jogRunActiveOffset = offset;
   try {
     const data = await fetchJson("/api/run/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ segments: motion.segments }),
+      body: JSON.stringify({ segments }),
     });
     jogRunApplyState(data);
     clearInterval(jogRunPollTimer);
@@ -1284,6 +1320,14 @@ async function jogRunPlan() {
   } catch (error) {
     setStatus(error.message);
   }
+}
+
+function jogRunResume() {
+  if (!jogRunResumeSegments) {
+    setStatus("Nothing to resume.");
+    return;
+  }
+  jogRunPlan(jogRunResumeSegments, jogRunResumeOffset);
 }
 
 async function jogRunStopFn() {
@@ -2302,6 +2346,7 @@ jogGoLocalHomeButton.addEventListener("click", () => jogGoLocalHome());
 jogGotoButton.addEventListener("click", () => jogGoto());
 jogRunButton.addEventListener("click", () => jogRunPlan());
 jogRunStopButton.addEventListener("click", () => jogRunStopFn());
+jogRunResumeButton.addEventListener("click", () => jogRunResume());
 
 for (const button of jogStepOptions.querySelectorAll("button")) {
   button.addEventListener("click", () => {
